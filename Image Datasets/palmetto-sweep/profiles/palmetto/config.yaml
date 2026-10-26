@@ -1,0 +1,17 @@
+executor: slurm
+jobs: 2
+local-cores: 1
+latency-wait: 120
+keep-going: true
+rerun-incomplete: true
+printshellcmds: true
+retries: 0
+
+# The executor discovers the account unless you provide your actual allocation.
+default-resources:
+  slurm_partition: work1
+  slurm_no_requeue: true
+  # slurm_account: YOUR_ACCOUNT
+  # gpu_model: a100
+
+# GPU count comes from gpu=1 in each rule. Do not also request gres.

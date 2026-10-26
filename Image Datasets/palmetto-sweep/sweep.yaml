@@ -1,0 +1,34 @@
+# Replace these with absolute Linux paths visible on every compute node.
+project_dir: /REPLACE/Exam-Level-Medical-Imaging-submission/Image Datasets
+python: /REPLACE/envs/imaging/bin/python
+results_dir: /REPLACE/shared/imaging_results
+radimagenet_checkpoint: /REPLACE/shared/weights/resnet50_torch.pt
+
+# Use a new name when changing data, preprocessing, or experimental settings.
+run_name: smoke_imagenet_1epoch_v1
+datasets: [achilles, ct, mri, xray]
+pooling: [attn, tanh_attn, avg, max, transformer, stan]
+sources: [imagenet] # Full sweep: [imagenet, radimagenet, instance]
+num_epochs: 1 # Applies to both stages; set null to use each dataset config's epochs
+
+# Same architecture, seed, folds, and attention head count across comparisons.
+seed: 123
+folds: 2
+num_heads: 1
+freeze_encoder: false
+
+# The trainer defaults to last and saving enabled. This sweep disables MIL weight files.
+model_selection: last # last or best_loss (lowest validation loss)
+save_models: false # Instance-pretraining checkpoints are still saved for transfer
+
+# One shared instance-training run per dataset; it learns from inherited bag labels.
+instance_initialization: imagenet
+
+# Resource estimates only: calibrate with one representative run per dataset.
+cpus: 8
+resources:
+  instance: {mem_mb: 64000, runtime_minutes: 1440}
+  achilles: {mem_mb: 64000, runtime_minutes: 1440}
+  ct: {mem_mb: 128000, runtime_minutes: 1440}
+  mri: {mem_mb: 128000, runtime_minutes: 1440}
+  xray: {mem_mb: 64000, runtime_minutes: 1440}

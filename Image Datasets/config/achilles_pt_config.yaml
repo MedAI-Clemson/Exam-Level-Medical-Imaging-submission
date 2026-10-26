@@ -1,26 +1,30 @@
-# Training parameters
+task: achilles
+seed: 123
+device: auto
 
 # file paths
 save_dir: "./achilles/pretrain"
 data_dir: "../Achilles_Classification/roi_data/"
 metadata_csv: "../Achilles_Classification/roi_data/mil_metadata.csv"
-     
+
 # data loading
 loader_kwargs:
-    batch_size: 75 
+    batch_size: 75
     num_workers: 4
 res: 224 # height and width
 
 # encoder
+pretraining: imagenet # Starting weights for training individual images with bag labels
 encoder_kwargs:
     model_name: 'resnet50d'
-    pretrained: True
     in_chans: 1
     num_classes: 1
     drop_rate: 0.0
-    
+
 # training
 mil: False
+model_selection: last # last or best_loss (lowest validation loss)
+save_models: True # Required when these weights initialize later MIL experiments
 num_epochs: 30
 optim_kwargs:
     lr: 1.e-3
@@ -28,8 +32,6 @@ optim_kwargs:
 sched_kwargs:
     step_size: 50
     gamma: 0.1
-verbose: False
-pretrain: False
 freeze_enc: False
-freeze_fc: False
+freeze_clf: False
 folds: 10

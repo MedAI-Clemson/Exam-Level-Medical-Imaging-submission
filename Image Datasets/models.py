@@ -1,258 +1,185 @@
+"""Instance classifiers and MIL pooling; every model returns logits."""
+
+import math
+
 import torch
 from torch import nn
-import math
-from utils import pad
+from torch.nn import functional as F
+from torch.nn.utils.rnn import pad_sequence
 
-class MILNet(nn.Module):
-    def __init__(self, encoder, pooling_method='attn', num_heads=1, num_features=512, num_out=1, drop_rate=0, attn_hidden_size=64, debug=False):
-        super(MILNet, self).__init__()
+from pretraining import load_radimagenet, normalize_model_state_dict
+
+
+POOLING_METHODS = ("attn", "tanh_attn", "avg", "max", "transformer", "stan")
+
+
+def pad_bags(features, lengths):
+    # features: [total_real_images, feature_count]; lengths: images in each bag.
+    if not lengths or min(lengths) <= 0 or sum(lengths) != len(features):
+        raise ValueError("Bag lengths must be positive and sum to the image count")
+
+    # Split the encoded images back into bags, then zero-pad to the longest bag.
+    # padded: [bags, max_images, features]; valid: [bags, max_images].
+    padded = pad_sequence(features.split(lengths), batch_first=True)
+    counts = torch.tensor(lengths, device=features.device)
+    valid = torch.arange(padded.shape[1], device=features.device)[None, :] < counts[:, None]
+
+    return padded, valid
+
+
+class Classifier(nn.Module):
+    """A common encoder/classifier interface for instance pretraining and bag training."""
+
+    def __init__(self, encoder, num_features, num_out=1, pooling=None,
+                 num_heads=1, drop_rate=0.0, attn_hidden_size=64):
+        super().__init__()
+        if pooling is not None and pooling not in POOLING_METHODS:
+            raise ValueError(f"Unknown pooling method: {pooling}")
+        if num_heads < 1:
+            raise ValueError("num_heads must be positive")
+
         self.encoder = encoder
+        self.pooling = pooling
+        self.num_out = num_out
         self.num_heads = num_heads
-        self.num_features = num_features
-        self.num_out = num_out
-        self.drop_rate = drop_rate
-        self.subspace_size = num_features // num_heads
-        self._scale = math.sqrt(self.subspace_size)
-        self.attn_hidden_size = attn_hidden_size
-        self.pool = pooling_method
-        if self.pool == 'attn':
-            self.pool_func = self.attn_pool
-            self.attn_vecs = nn.Parameter(torch.randn(self.num_heads, self.subspace_size))
-        elif self.pool == 'tanh_attn':
-            self.pool_func = self.tanh_attention_pool
-            self.V = nn.Parameter(torch.randn(self.num_heads, self.attn_hidden_size, self.subspace_size))
-            self.w = nn.Parameter(torch.randn(self.num_heads, self.attn_hidden_size))        
-        elif self.pool == 'transformer':
-            self.pool_func = self.transformer_pool
-            self.proj_features = 64
-            self.projection = nn.Linear(self.num_features, self.proj_features)
-            # Add transformer encoder layer
-            encoder_layer = nn.TransformerEncoderLayer(
-                d_model=self.proj_features,
-                nhead=num_heads,
-                dim_feedforward=128,
-                dropout=drop_rate,
-                batch_first=True
-            )
-            self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=2)
-            # Learnable [CLS] token
-            self.cls_token = nn.Parameter(torch.randn(1, 1, self.proj_features))
-        elif self.pool == 'max':
-            self.pool_func = self.max_pool
-        elif self.pool == 'avg':
-            self.pool_func = self.avg_pool
+        self.freeze_encoder = False
+        clf_features = num_features
+
+        # Each attention head learns weights from its own subset of image features.
+        if pooling in ("attn", "tanh_attn"):
+            if num_features % num_heads:
+                raise ValueError("Encoder feature count must be divisible by num_heads")
+            self.subspace = num_features // num_heads
+            if pooling == "attn":
+                self.query = nn.Parameter(torch.randn(num_heads, self.subspace))
+            else:
+                self.V = nn.Parameter(torch.randn(num_heads, attn_hidden_size, self.subspace))
+                self.w = nn.Parameter(torch.randn(num_heads, attn_hidden_size))
+
+        # The transformer uses a smaller feature space and a learned token for the bag.
+        if pooling == "transformer":
+            clf_features = 64
+            if clf_features % num_heads:
+                raise ValueError("Transformer width (64) must be divisible by num_heads")
+            self.projection = nn.Linear(num_features, clf_features)
+            layer = nn.TransformerEncoderLayer(clf_features, num_heads, 128,
+                                               dropout=drop_rate, batch_first=True)
+            self.transformer = nn.TransformerEncoder(layer, 2, enable_nested_tensor=False)
+            self.bag_token = nn.Parameter(torch.randn(1, 1, clf_features))
+
+        # The classifier converts the image or pooled bag description into class logits.
+        self.clf = nn.Sequential(nn.Dropout(drop_rate), nn.Linear(clf_features, num_out))
+
+    def load_state_dict(self, state_dict, strict=True, assign=False):
+        # Read old workflow checkpoint names while saving new checkpoints with clf.* keys.
+        return super().load_state_dict(normalize_model_state_dict(state_dict), strict=strict, assign=assign)
+
+    def set_encoder_frozen(self, frozen):
+        # Freeze both gradient updates and training-only behavior inside the encoder.
+        self.freeze_encoder = frozen
+        self.encoder.requires_grad_(not frozen)
+        self.encoder.train(self.training and not frozen)
+
+    def train(self, mode=True):
+        super().train(mode)
+        if self.freeze_encoder:
+            self.encoder.eval()  # Also freeze BatchNorm buffers and encoder dropout.
+
+        return self
+
+    def forward(self, images, lengths):
+        # A feature vector is a learned numerical description of one image.
+        # The encoder maps [images, channels, height, width] to [images, features].
+        features = self.encoder(images)
+        if features.ndim != 2:
+            raise ValueError("Encoder must return [number_of_images, number_of_features]")
+
+        # Instance training classifies each image directly, without combining images.
+        if self.pooling is None:
+            return self.clf(features)
+
+        # Standard MIL combines instance probabilities rather than feature vectors.
+        if self.pooling == "stan":
+            return self.standard_pool(self.clf(features), lengths)
+
+        if self.pooling == "transformer":
+            padded, valid = pad_bags(self.projection(features), lengths)
+
+            # Prepend the bag token. It is always valid; padded image tokens are masked.
+            tokens = torch.cat([self.bag_token.expand(len(lengths), -1, -1), padded], dim=1)
+            valid = F.pad(valid, (1, 0), value=True)
+            return self.clf(self.transformer(tokens, src_key_padding_mask=~valid)[:, 0])
+
+        # Feature pooling combines real images into one feature vector per bag.
+        padded, valid = pad_bags(features, lengths)
+
+        if self.pooling == "avg":
+            # Padded zeros add nothing, but the denominator must count only real images.
+            pooled = padded.sum(1) / valid.sum(1, keepdim=True)
+
+        elif self.pooling == "max":
+            # Padding must not beat negative features when selecting a maximum.
+            pooled = padded.masked_fill(~valid[..., None], -torch.inf).max(1).values
+
         else:
-            raise NotImplementedError(f"{self.pool} pooling method has not been implemented. Use one of 'attn', 'max', or 'avg'")
-        
-        if self.pool == 'transformer':
-            self.fc = nn.Sequential(
-                nn.Dropout(self.drop_rate),
-                nn.Linear(self.proj_features, self.num_out)
-            )
-        else:
-            self.fc = nn.Sequential(
-                nn.Dropout(self.drop_rate),
-                nn.Linear(self.num_features, self.num_out)
-            )
-        self.debug = debug
-        
-    def forward(self, x, num_imgs):
-        # hn_img: the hidden representations of each img
-        print("x shape:", x.shape) if self.debug else None
-        hn_img = self.encoder(x)
-        print("hn_img shape:", hn_img.shape) if self.debug else None
-        # expect [L*N, h_dim (num_features)]
-        
-        # find the hidden representation of entire study and corresponding attn score
-        h_study, attn = self.pool_func(hn_img, num_imgs)
-        # expect [N, num_heads, subspace_size], [L, N, num_heads]
-        
-        # feed to fully-connected layer for decoding
-        output = self.fc(h_study)
-        print("output shape:", output.shape) if self.debug else None
-        # expect [N, output size]
-        
-        return output, attn
-    
-    def attn_pool(self, hn_img, num_imgs):
-        # Calculate attention logits
-        hn_img = hn_img.view(-1, self.num_heads, self.subspace_size)
-        print("hn shape:", hn_img.shape) if self.debug else None
-        # expect [L*N, num_heads, subspace size]
-        print("query vector shape:", self.attn_vecs.shape) if self.debug else None
-        # expect [num_heads, subspace size]
-        
-        alpha = (hn_img * self.attn_vecs).sum(axis=-1) / self._scale
-        print("alpha shape:", alpha.shape) if self.debug else None
-        # expect [L*N, num_heads]
-        
-        # normalized attention
-        alpha = pad(alpha, num_imgs)
-        print("alpha_pad shape:", alpha.shape) if self.debug else None
-        # expect [L, N]?
-        for ix, n in enumerate(num_imgs):
-            alpha[n:, ix]=-50
-        attn = torch.softmax(alpha, axis=0)
-        print("attn shape:", attn.shape) if self.debug else None
-        # expect [L, N, num_heads]
-        
-        # pool within subspaces
-        h_query_pad = pad(hn_img, num_imgs) # reshapes the study with the number of images
-        print("h_query_pad shape:", h_query_pad.shape) if self.debug else None
-        # expect [L, N, num_heads, subspace size]
-        h_study = torch.sum(h_query_pad * attn[...,None], axis=0)
-        print("h_study shape:", h_study.shape) if self.debug else None
-        # expect [N, num_heads, subspace size]
-        
-        h_study_wide = h_study.view(-1, self.num_features)
-        print("h_study_wide shape:", h_study_wide.shape) if self.debug else None
-        # expect [N, h_dim]
-        
-        return h_study_wide, attn
-            
-    def tanh_attention_pool(self, h, num_imgs):
-        # attention logits
-        h_query = h.view(-1, self.num_heads, self.subspace_size)
-        print("h_query shape:", h_query.shape) if self.debug else None
-        # expect [L*N, num_heads, subspace_size]
-        print("query vector shape:", self.attn_query_vecs.shape) if self.debug else None
-        # expect [num_heads, subspace_size]
-        alpha = torch.einsum('ijk,jlk->ijl', h_query, self.V).tanh()
-        print("alpha shape:", alpha.shape) if self.debug else None
-        # expect [L*N, num_heads, attn_hidden_size]
-        lamb = torch.einsum('ijl,jl->ij', alpha, self.w)
-        print("lambda shape:", lamb.shape) if self.debug else None
-        # expect [L*N, num_heads]
-        
-        # normalized attention
-        lamb = pad(lamb, num_imgs)
-        for ix, n in enumerate(num_imgs):
-            lamb[n:, ix]=-50
-        attn = torch.softmax(lamb, axis=0)
-        print("attn shape:", attn.shape) if self.debug else None
-        # expect [L, N, num_heads]
-        
-        # pool within subspaces
-        h_query_pad = pad(h_query, num_imgs)
-        print("h_query_pad shape:", h_query_pad.shape) if self.debug else None
-        # expect [L, N, num heads, subspace_size]
-        h_study = torch.sum(h_query_pad * attn[...,None] / self._scale, axis=0)
-        print("h_vid shape:", h_study.shape) if self.debug else None
-        # expect [N, num heads, subspace_size]
-        
-        h_study_wide = h_study.view(-1, self.num_features)
-        print("h_study_wide shape:", h_study_wide.shape) if self.debug else None
-        # expect [N, h_dim]
-        
-        return h_study_wide, attn
-        
-    def transformer_pool(self, h, num_imgs):
-        # Project first
-        h = self.projection(h)  # [L*N, proj_features]
-        print("h-proj shape:", h.shape) if self.debug else None
-        h_pad = pad(h, num_imgs)  # [L, N, proj_features] 
-        print("h_pad shape:", h_pad.shape) if self.debug else None
-        h_pad = h_pad.transpose(0, 1)  # [N, L, proj_features]
- 
-        # Rest remains same
-        max_len = h_pad.size(1)
-        batch_size = h_pad.size(0)
-        attention_mask = torch.ones(batch_size, max_len + 1, dtype=torch.bool, device=h.device)
- 
-        for i, n in enumerate(num_imgs):
-            attention_mask[i, n+1:] = False
- 
-        cls_tokens = self.cls_token.to(h.device).expand(batch_size, -1, -1)
-        x = torch.cat((cls_tokens, h_pad), dim=1)
-        print("x shape:", x.shape) if self.debug else None # [N, L+1, proj_features]
-        x = self.transformer_encoder(x, src_key_padding_mask=~attention_mask)
-        print("x-trans shape:", x.shape) if self.debug else None # [N, L+1, proj_features]
- 
-        h_study = x[:, 0] 
-        print("h_study shape:", h_study.shape) if self.debug else None # [N, proj_features]
-        
-        return h_study, None
+            # h: [bags, max_images, heads, features_per_head].
+            h = padded.reshape(*padded.shape[:2], self.num_heads, self.subspace)
+            if self.pooling == "attn":
+                scores = (h * self.query).sum(-1) / math.sqrt(self.subspace)
+            else:
+                hidden = torch.einsum("blhd,hkd->blhk", h, self.V).tanh()
+                scores = torch.einsum("blhk,hk->blh", hidden, self.w)
 
-    def max_pool(self, hn_img, num_imgs):
-        hn_pad = pad(hn_img, num_imgs)
-        print("hn_pad shape:", hn_pad.shape) if self.debug else None
-        # expect [L, N, h_dim]
-        
-        # take max
-        h_study = hn_pad.max(0).values
-        print("h_study shape:", h_study.shape) if self.debug else None
-        # expect [N, h_dim]
-        
-        return h_study, None
-    
-    def avg_pool(self, hn_img, num_imgs):
-        hn_pad = pad(hn_img, num_imgs)
-        print("hn_pad shape:", hn_pad.shape) if self.debug else None
-        # expect [L, N, h_dim]
-        
-        # take avg
-        h_study = hn_pad.mean(0)
-        print("h_study shape:", h_study.shape) if self.debug else None
-        # expect [N, h_dim]
-        
-        return h_study, None
+            # Softmax runs across images. Masking gives padding zero attention weight.
+            weights = scores.masked_fill(~valid[..., None], -torch.inf).softmax(dim=1)
+            pooled = (h * weights[..., None]).sum(1).flatten(1)
 
-       
+        return self.clf(pooled)
 
-'''
-Standard MIL Assumption
-- following the standard assumption that at least one positive is in bag
-meaning that the probability of a positive bag is equal to the probability 
-of 1 minus the probability that none of the instances are bags
-    p_bag = 1 - product((1-p_i), i)
-'''
-class StandardMILNet(nn.Module):
-    def __init__(self, encoder, num_features=2048, num_out=1, dropout=0.0, debug=False):
-        super(StandardMILNet, self).__init__()
-        self.proj_features = num_features
-        self.num_out = num_out
-        self.drop_rate = dropout
-        self.encoder = encoder
+    def standard_pool(self, logits, lengths):
+        # Noisy-OR in log space: log P(no positive instance) = sum log(1 - p_i).
         if self.num_out == 1:
-            self.fc = nn.Sequential(
-                nn.Dropout(self.drop_rate),
-                nn.Linear(self.proj_features, self.num_out),
-                nn.Sigmoid()
-            )
+            log_absent = F.logsigmoid(-logits)
         else:
-            self.fc = nn.Sequential(
-                nn.Dropout(self.drop_rate),
-                nn.Linear(self.proj_features, self.num_out),
-                nn.Softmax(dim=0)
-            )
-        self.debug = debug
-        
-    def forward(self, x, num_imgs):
-        # hn_img: the hidden representations of each img
-        print("x shape:", x.shape) if self.debug else None
-        print("num_imgs:", num_imgs) if self.debug else None
-        
-        # encoder
-        features = self.encoder(x)
-        print("feature shape:", features.shape) if self.debug else None
-        
-        # fc layer - instance probabilities
-        probs = self.fc(features)
-        print("probs shape:", probs.shape) if self.debug else None
-        
-        # padding images
-        hn_pad = pad(probs, num_imgs)
-        print("hn_pad shape:", hn_pad.shape) if self.debug else None
-        
-        # bag probability
-        bag_p = 1 - torch.prod(1-hn_pad, dim=0)
-        if self.num_out != 1:
-            bag_p = bag_p / bag_p.sum(dim=1, keepdim=True)
-        print("bag_p shape:", bag_p.shape) if self.debug else None
-        
-        return bag_p, None
+            # Normalize across classes for each image, never across images.
+            probability = logits.softmax(dim=-1)
+            log_absent = torch.log1p(-probability.clamp(max=1 - torch.finfo(logits.dtype).eps))
 
-        
-        
+        padded, _ = pad_bags(log_absent, lengths)  # Padding zero is neutral to the sum.
+        absent = padded.sum(1)
 
-       
+        # log P(at least one positive) = log(1 - exp(log P(none))).
+        # expm1 preserves precision when the probability of no positive is close to one.
+        present = (-torch.expm1(absent)).clamp_min(torch.finfo(logits.dtype).tiny).log()
+
+        if self.num_out == 1:
+            return present - absent  # log odds, suitable for BCEWithLogitsLoss.
+
+        # Softmax(log P(class present)) implements the original normalized noisy-OR.
+        return present
+
+
+def build_model(cfg):
+    import timm
+
+    # num_classes=0 asks timm for pooled image features without its classifier.
+    encoder_options = dict(cfg["encoder_kwargs"])
+    num_out = encoder_options.pop("num_classes")
+    encoder_options.pop("pretrained", None)  # Weight choice comes from pretraining, not a second flag.
+    source = cfg["pretraining"]
+    encoder = timm.create_model(**encoder_options, num_classes=0, pretrained=source == "imagenet")
+
+    # Instance mode loads its matching fold later; it must not download ImageNet weights first.
+    if source == "radimagenet":
+        load_radimagenet(encoder, cfg["radimagenet_checkpoint"])
+
+    # Use the same encoder/classifier interface for pretraining and MIL weight transfer.
+    options = dict(cfg.get("net_kwargs", {}))
+    options.pop("debug", None)
+    if options.pop("num_out", num_out) != num_out:
+        raise ValueError("net_kwargs.num_out and encoder_kwargs.num_classes must agree")
+
+    pooling = options.pop("pooling_method", "attn") if cfg["mil"] else None
+    options.pop("pooling_method", None)
+
+    return Classifier(encoder, encoder.num_features, num_out, pooling=pooling, **options)

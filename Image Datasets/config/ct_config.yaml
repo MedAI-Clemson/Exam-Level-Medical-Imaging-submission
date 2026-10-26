@@ -1,17 +1,21 @@
-# Training parameters
+task: ct
+seed: 123
+device: auto
+preprocessing:
+    ct_window: [-1000, 400] # HU clipping bounds; review for the experiment
 
 # file paths
 save_dir: "./test/ct/"
 pretrained_model_dir: "./ct/pretrain"
 data_dir: "../CT/data/"
 metadata_csv: "../CT/ct_metadata.csv"
-     
+
 # data loading
 loader_kwargs:
     batch_size: 1
     num_workers: 8
 res: 224 # height and width
-    
+
 # model
 net_kwargs:
     num_heads: 1
@@ -21,15 +25,17 @@ net_kwargs:
     debug: False
 
 # encoder
+pretraining: imagenet # imagenet, radimagenet, or instance
 encoder_kwargs:
     model_name: 'resnet50d'
-    pretrained: True
     in_chans: 1
     num_classes: 1
     drop_rate: 0.2
-    
+
 # training
 mil: True
+model_selection: last # last or best_loss (lowest validation loss)
+save_models: False # Current experiment: export metrics/predictions without model files
 num_epochs: 10
 optim_kwargs:
     lr: 1.e-3
@@ -37,9 +43,6 @@ optim_kwargs:
 sched_kwargs:
     step_size: 50
     gamma: 0.1
-verbose: False
-pretrain_enc: False
-pretrain_fc: False
 freeze_enc: False
-freeze_fc: False
+freeze_clf: False
 folds: 10

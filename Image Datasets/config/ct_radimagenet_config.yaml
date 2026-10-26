@@ -1,0 +1,49 @@
+task: ct
+seed: 123
+device: auto
+
+# File paths are relative to Image Datasets unless path_root is specified.
+save_dir: "./test/ct_radimagenet/"
+data_dir: "../CT/data/"
+metadata_csv: "../CT/ct_metadata.csv"
+radimagenet_checkpoint: "./weights/resnet50_torch.pt"
+
+# Official RadImageNet PyTorch ResNet-50 weights use this architecture, not resnet50d.
+pretraining: radimagenet
+encoder_kwargs:
+    model_name: resnet50
+    in_chans: 1
+    num_classes: 1
+    drop_rate: 0.2
+
+# Set true for a fixed feature extractor, or false to fine-tune the encoder.
+freeze_enc: False
+freeze_clf: False
+
+mil: True
+model_selection: last # last or best_loss (lowest validation loss)
+save_models: False # Current experiment: export metrics/predictions without model files
+net_kwargs:
+    pooling_method: attn
+    num_heads: 1
+    drop_rate: 0.0
+
+loader_kwargs:
+    batch_size: 1
+    num_workers: 8
+res: 224
+preprocessing:
+    ct_window: [-1000, 400]
+transform_kwargs:
+    mean: 0.5
+    std: 0.5
+    rotation: 10.0
+
+folds: 10
+num_epochs: 10
+optim_kwargs:
+    lr: 1.e-3
+    weight_decay: 5.e-3
+sched_kwargs:
+    step_size: 50
+    gamma: 0.1

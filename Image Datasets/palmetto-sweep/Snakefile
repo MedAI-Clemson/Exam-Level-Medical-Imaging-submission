@@ -1,0 +1,103 @@
+"""Run from this directory. Training code and data stay in their shared locations."""
+
+from pathlib import Path
+import re
+
+configfile: "sweep.yaml"
+
+PROJECT = Path(config["project_dir"]).expanduser().resolve()
+PYTHON = config["python"]
+DATASETS = config["datasets"]
+POOLING = config["pooling"]
+SOURCES = config.get("sources", ["imagenet", "radimagenet", "instance"])
+ROOT = str(Path(config["results_dir"]).expanduser().resolve() / config["run_name"])
+HELPER = str(Path(workflow.basedir) / "run_experiment.py")
+SWEEP = str(Path("sweep.yaml").resolve())
+CODE = [str(path) for path in PROJECT.glob("*.py")]
+
+assert set(DATASETS) <= {"achilles", "ct", "mri", "xray"}
+assert set(POOLING) <= {"attn", "tanh_attn", "avg", "max", "transformer", "stan"}
+assert set(SOURCES) <= {"imagenet", "radimagenet", "instance"}
+assert DATASETS and POOLING and SOURCES
+assert config.get("num_epochs") is None or (type(config["num_epochs"]) is int and config["num_epochs"] > 0)
+assert config["instance_initialization"] in ("imagenet", "radimagenet")
+assert re.fullmatch(r"[A-Za-z0-9_-]+", config["run_name"]), "Use a simple run_name"
+
+
+def base_config(wildcards):
+    return str(PROJECT / "config" / f"{wildcards.dataset}_config.yaml")
+
+
+def instance_config(wildcards):
+    return str(PROJECT / "config" / f"{wildcards.dataset}_pt_config.yaml")
+
+
+def instance_marker(dataset):
+    return f"{ROOT}/completed/{dataset}/instance_pretrain.json"
+
+
+def mil_dependencies(wildcards):
+    if wildcards.source == "instance":
+        return [instance_marker(wildcards.dataset)]
+    if wildcards.source == "radimagenet":
+        return [config["radimagenet_checkpoint"]]
+    return []
+
+
+wildcard_constraints:
+    dataset="|".join(DATASETS),
+    source="|".join(SOURCES),
+    pooling="|".join(POOLING)
+
+
+rule all:
+    input:
+        expand(ROOT + "/completed/{dataset}/{source}/{pooling}.json",
+               dataset=DATASETS, source=SOURCES, pooling=POOLING)
+
+
+rule instance_pretrain:
+    input:
+        base=base_config,
+        training=instance_config,
+        sweep=SWEEP,
+        helper=HELPER,
+        code=CODE,
+        weights=([config["radimagenet_checkpoint"]]
+                 if config["instance_initialization"] == "radimagenet" else [])
+    output:
+        ROOT + "/completed/{dataset}/instance_pretrain.json"
+    threads: config["cpus"]
+    resources:
+        mem_mb=config["resources"]["instance"]["mem_mb"],
+        runtime=config["resources"]["instance"]["runtime_minutes"],
+        gpu=1
+    log:
+        ROOT + "/logs/{dataset}/instance_pretrain.log"
+    shell:
+        "{PYTHON:q} {input.helper:q} --sweep {input.sweep:q} --dataset {wildcards.dataset:q} "
+        "--stage instance --threads {threads} --marker {output:q} --log {log:q}"
+
+
+rule train_mil:
+    input:
+        base=base_config,
+        sweep=SWEEP,
+        helper=HELPER,
+        code=CODE,
+        initialization=mil_dependencies
+    output:
+        ROOT + "/completed/{dataset}/{source}/{pooling}.json"
+    threads: config["cpus"]
+    resources:
+        mem_mb=lambda w: config["resources"][w.dataset]["mem_mb"],
+        runtime=lambda w: config["resources"][w.dataset]["runtime_minutes"],
+        gpu=1
+    params:
+        pretrained=lambda w: instance_marker(w.dataset) if w.source == "instance" else ""
+    log:
+        ROOT + "/logs/{dataset}/{source}/{pooling}.log"
+    shell:
+        "{PYTHON:q} {input.helper:q} --sweep {input.sweep:q} --dataset {wildcards.dataset:q} "
+        "--stage mil --source {wildcards.source:q} --pooling {wildcards.pooling:q} "
+        "--instance-marker={params.pretrained:q} --threads {threads} --marker {output:q} --log {log:q}"

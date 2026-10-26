@@ -1,70 +1,120 @@
+"""Reproducibility, patient-isolated folds, metrics, and checkpoint selection."""
+
+import random
+import warnings
+
+import numpy as np
 import torch
-from torch import nn
-from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_sequence
-from torch.utils.data import default_collate
+from sklearn import metrics
+from sklearn.model_selection import StratifiedGroupKFold
 
-def pad(h, num_imgs):
-    # reshape as batch of studies and pad
-    start_ix = 0
-    h_ls = []
-    for n in num_imgs:
-        h_ls.append(h[start_ix:(start_ix+n)])
-        start_ix += n
-    h = pad_sequence(h_ls)
-
-    return h
-
-def paddp(h, num_imgs, num_series):
-    # reshape as batch of studies and pad
-    start_ix = 0
-    h_ls = []
-    for n in num_imgs:
-        h_ls.append(h[start_ix:(start_ix+n)])
-        start_ix += n
-    h = pad_sequence(h_ls)
-
-    return h
-
-def num_parameters(module):
-    return sum(p.numel() for p in module.parameters() if p.requires_grad)
+from pretraining import normalize_model_state_dict
 
 
-def custom_collate(batch):
-    batch_studies = torch.concat([record["study"] for record in batch])
-    batch_lengths = [len(record["study"]) for record in batch]
-    
-    record = {
-        "study": batch_studies,
-        "num_imgs": batch_lengths
+def seed_everything(seed):
+    # Seed all random sources used for sampling, augmentation, and model initialization.
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+    # Favor repeatable cuDNN behavior over automatic algorithm benchmarking.
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+
+
+def seed_worker(worker_id):
+    # DataLoader assigns each worker a torch seed; align its NumPy and Python RNGs.
+    seed = torch.initial_seed() % (2 ** 32)
+    random.seed(seed)
+    np.random.seed(seed)
+
+
+def make_folds(manifest, n_splits, seed):
+    # Split bags before expanding to instances, so pretraining and MIL use the same patients.
+    bags = manifest[["bag_id", "patient_id", "label"]].drop_duplicates().sort_values("bag_id")
+
+    counts = bags.groupby("label").patient_id.nunique()
+    if (counts < n_splits).any():
+        raise ValueError(f"Need at least {n_splits} distinct patients per class; got {counts.to_dict()}")
+
+    # Stratify using bag labels, but keep every bag from a patient in the same partition.
+    splitter = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+    folds = []
+    for train_index, val_index in splitter.split(bags, bags.label, bags.patient_id):
+        train_patients = set(bags.iloc[train_index].patient_id)
+        val_patients = set(bags.iloc[val_index].patient_id)
+        if train_patients & val_patients:
+            raise RuntimeError("Patient overlap between train and validation")
+
+        # Expand patient assignments back to the manifest's individual image rows.
+        train = manifest.loc[manifest.patient_id.isin(train_patients)].copy()
+        val = manifest.loc[manifest.patient_id.isin(val_patients)].copy()
+        if set(train.label) != set(bags.label) or set(val.label) != set(bags.label):
+            raise ValueError("Grouped stratification produced a fold missing a class; reduce folds")
+        folds.append((train, val))
+
+    return folds
+
+
+def classification_metrics(labels, probabilities):
+    # Binary predictions store P(positive); multiclass predictions store one probability per class.
+    binary = probabilities.shape[1] == 1
+    predicted = (probabilities[:, 0] >= 0.5).astype(int) if binary else probabilities.argmax(1)
+    classes = list(range(2 if binary else probabilities.shape[1]))
+    average = "binary" if binary else "macro"
+
+    # Macro averaging gives each multiclass label equal weight.
+    result = {
+        "accuracy": float(metrics.accuracy_score(labels, predicted)),
+        "precision": float(metrics.precision_score(labels, predicted, average=average,
+                                                  labels=classes, zero_division=0)),
+        "sensitivity": float(metrics.recall_score(labels, predicted, average=average,
+                                                  labels=classes, zero_division=0)),
+        "f1score": float(metrics.f1_score(labels, predicted, average=average,
+                                         labels=classes, zero_division=0)),
     }
-    for b in batch:
-        b.pop('study')
-    record.update(default_collate(batch))
-    
-    return record
+
+    # A class-incomplete subset has no defined AUROC; NaN must not be reported as zero.
+    if set(labels) != set(classes):
+        warnings.warn("AUROC is undefined because this evaluation is missing a class")
+        result["roc_auc"] = float("nan")
+    elif binary:
+        result["roc_auc"] = float(metrics.roc_auc_score(labels, probabilities[:, 0]))
+    else:
+        result["roc_auc"] = float(metrics.roc_auc_score(labels, probabilities,
+                                                       labels=classes, multi_class="ovr"))
+
+    if binary:
+        result["specificity"] = float(metrics.recall_score(labels, predicted, pos_label=0,
+                                                          zero_division=0))
+
+    return result
 
 
-def collate_fn(batch):
-    # print("collate_fn called")
-    # Initialize empty lists for combined bags and labels
-    combined_bag_images = []
-    combined_instance_labels = []
-    combined_bag_labels = []  # Collect all bag labels
-    combined_patient_ids = []
-    markers = [0]  # Start with 0, the index for the start of the first bag
-    
-    total_images = 0
-    for bag, (bag_label, instance_labels, patient_id) in batch:
-        num_images = bag.shape[0]  # Number of images in the current bag
-        total_images += num_images
-        combined_bag_images.append(bag)
-        combined_instance_labels.append(instance_labels)
-        combined_bag_labels.append(bag_label)  # Collect bag labels for each study bag
-        combined_patient_ids.append(patient_id)
-        markers.append(total_images)  # Append cumulative image count
+def save_checkpoint(path, model, metadata):
+    # Serialization finishes before the next training step; no persistent weight copy is needed.
+    state = {key: value.detach().cpu() for key, value in model.state_dict().items()}
+    torch.save({**metadata, "model_state_dict": state}, path)
 
-    # Combine all study bags into one along the 0th dimension (number of images)
-    combined_bag_images = torch.cat(combined_bag_images, dim=0)  # Combined shape: [n1 + n2 + ..., channel, h, w]
-    combined_instance_labels = torch.cat(combined_instance_labels, dim=0)  # Combined instance labels
 
-    return combined_bag_images, (combined_bag_labels, combined_instance_labels, combined_patient_ids, markers)
+def load_pretraining(model, checkpoint, cfg, train_patients, val_patients):
+    # Legacy checkpoints have no trustworthy split provenance and are deliberately rejected.
+    expected = {"format_version": 2, "task": cfg["task"], "mil": False,
+                "encoder_name": cfg["encoder_kwargs"]["model_name"], "num_out": model.num_out,
+                "train_patients": sorted(train_patients), "val_patients": sorted(val_patients)}
+    for key, value in expected.items():
+        if checkpoint.get(key) != value:
+            raise ValueError(f"Pretraining checkpoint has incompatible {key}; regenerate it")
+
+    # Version-2 instance checkpoints from this workflow already inherited bag labels.
+    if checkpoint.get("instance_label_source", "bag") != "bag":
+        raise ValueError("Instance pretraining must use bag labels as instance labels")
+
+    # Transfer by named module prefixes, not by the order of checkpoint dictionary entries.
+    state = normalize_model_state_dict(checkpoint["model_state_dict"])
+    for name, enabled in (("encoder", True), ("clf", cfg.get("instance_load_clf", False))):
+        if enabled:
+            prefix = name + "."
+            weights = {key[len(prefix):]: value for key, value in state.items() if key.startswith(prefix)}
+            getattr(model, name).load_state_dict(weights, strict=True)
