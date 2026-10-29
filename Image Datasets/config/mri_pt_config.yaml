@@ -6,8 +6,8 @@ preprocessing:
 
 # file paths
 save_dir: "./mri/pretrain"
-data_dir: "../MRI/data/"
-metadata_csv: "../MRI/mri_metadata.csv"
+data_dir: "/home/bformby/research/ml/MRI/data/"
+metadata_csv: "/home/bformby/research/ml/MRI/mri_metadata.csv"
 
 # data loading
 loader_kwargs:

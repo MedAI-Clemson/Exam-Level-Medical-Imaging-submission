@@ -53,7 +53,10 @@ def read_metadata(cfg):
     elif task == "mri":
         # Combine a patient's selected series into one bag.
         patient, bag, source = "ProxID", "ProxID", "SeriesUID"
-        labels = pd.to_numeric(data["ClinSig"])
+        # Accept boolean text and numeric binary labels.
+        labels = data["ClinSig"].str.strip().str.lower().map(
+            {"true": 1, "false": 0, "1": 1, "0": 0, "1.0": 1, "0.0": 0}
+        )
 
     elif task == "ct":
         # Keep each series as a bag, while retaining patient IDs for fold isolation.

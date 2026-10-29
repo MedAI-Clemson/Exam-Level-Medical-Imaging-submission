@@ -5,8 +5,8 @@ device: auto
 # file paths
 save_dir: "./test/achilles/"
 pretrained_model_dir: "./achilles/pretrain"
-data_dir: "../Achilles_Classification/roi_data/"
-metadata_csv: "../Achilles_Classification/roi_data/mil_metadata.csv"
+data_dir: "/home/bformby/research/ml/Achilles_Classification/roi_data/"
+metadata_csv: "/home/bformby/research/ml/Achilles_Classification/roi_data/mil_metadata.csv"
 
 # data loading
 loader_kwargs:

@@ -4,9 +4,9 @@ device: auto
 
 # file paths
 save_dir: "./xray/pretrain"
-data_dir: "../Xray/data/"
-metadata_csv: "../Xray/images.csv"
-targets_csv: "../Xray/targets.csv"
+data_dir: "/home/bformby/research/ml/Xray/data/"
+metadata_csv: "/home/bformby/research/ml/Xray/images.csv"
+targets_csv: "/home/bformby/research/ml/Xray/targets.csv"
 
 # data loading
 loader_kwargs:
