@@ -5,7 +5,7 @@ results_dir: ~/research/ml/Exam-Level-Medical-Imaging-submission/Image Datasets/
 radimagenet_checkpoint: /home/bformby/research/ml/weights/radimagenet/ResNet50.pt
 
 # Use a new name when changing data, preprocessing, or experimental settings.
-run_name: frozen_sweep
+run_name: combined_randaugment_sweep
 datasets: [achilles, ct, mri, xray]
 pooling: [avg, max, attn, tanh_attn, transformer]
 sources: [imagenet, radimagenet, instance] # Full sweep: [imagenet, radimagenet, instance]
@@ -15,7 +15,7 @@ num_epochs: null # Applies to both stages; set null to use each dataset config's
 seed: 123
 folds: 10
 num_heads: 16
-freeze_encoder: true
+encoder_states: [trainable, frozen] # Select either one or both for MIL
 
 # The trainer defaults to last and saving enabled. This sweep disables MIL weight files.
 model_selection: last # last or best_loss (lowest validation loss)

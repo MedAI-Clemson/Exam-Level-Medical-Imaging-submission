@@ -171,7 +171,7 @@ class DataAndTrainingTests(unittest.TestCase):
     def test_dataset_loads_fresh_images_on_each_access(self):
         manifest = self.manifest().iloc[:2].copy()
         manifest["bag_id"] = "bag"
-        cfg = {"task": "xray", "mil": True, "res": 4, "transform_kwargs": {"rotation": 0}}
+        cfg = {"task": "xray", "mil": True, "res": 4, "transform_kwargs": {"num_ops": 0}}
         with patch("datasets.load_image", return_value=torch.ones(1, 4, 4)) as reader:
             dataset = ImagingDataset(manifest, cfg, train=True)
             self.assertEqual(reader.call_count, 0)
@@ -326,7 +326,7 @@ class DataAndTrainingTests(unittest.TestCase):
             cfg = {"task": "achilles", "mil": True, "pretraining": "imagenet", "seed": 123, "device": "cpu", "folds": 2,
                    "num_epochs": 2, "model_selection": "best_loss", "save_models": True,
                    "save_dir": str(Path(temporary) / "run"), "res": 4,
-                   "transform_kwargs": {"rotation": 0}, "loader_kwargs": {"batch_size": 7, "num_workers": 0},
+                   "transform_kwargs": {"num_ops": 0}, "loader_kwargs": {"batch_size": 7, "num_workers": 0},
                    "encoder_kwargs": {"model_name": "synthetic", "num_classes": 1},
                    "optim_kwargs": {"lr": 0.001}, "sched_kwargs": {"step_size": 1, "gamma": 0.9}}
             def tiny_model(config):

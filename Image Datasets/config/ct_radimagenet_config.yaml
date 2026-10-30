@@ -25,7 +25,7 @@ model_selection: last # last or best_loss (lowest validation loss)
 save_models: False # Current experiment: export metrics/predictions without model files
 net_kwargs:
     pooling_method: attn
-    num_heads: 1
+    num_heads: 16
     drop_rate: 0.0
 
 loader_kwargs:
@@ -37,7 +37,8 @@ preprocessing:
 transform_kwargs:
     mean: 0.5
     std: 0.5
-    rotation: 10.0
+    num_ops: 2
+    magnitude: 9
 
 folds: 10
 num_epochs: 10

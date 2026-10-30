@@ -17,7 +17,7 @@ res: 224 # height and width
 
 # model
 net_kwargs:
-    num_heads: 1
+    num_heads: 16
     num_out: 3
     pooling_method: 'attn'
     drop_rate: 0.0

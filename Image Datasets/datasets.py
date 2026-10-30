@@ -162,7 +162,7 @@ class ImagingDataset(Dataset):
     def __getitem__(self, index):
         bag_id, patient_id, label, paths = self.samples[index]
 
-        # Decode and augment on every access, so each training epoch sees fresh rotations.
+        # Decode and augment on every access, so each training epoch sees fresh RandAugment operations.
         images = [self.transform(load_image(path, self.task, self.preprocessing)) for path in paths]
 
         # Stacking preserves the channel axis: [images_in_bag, channels, height, width].

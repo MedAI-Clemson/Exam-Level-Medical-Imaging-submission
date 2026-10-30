@@ -36,7 +36,7 @@ output location; an existing nonempty output directory is never overwritten.
 | `configuration.py` | Read YAML, check settings, resolve paths |
 | `datasets.py` | Adapt source CSVs, create a manifest, lazily load samples |
 | `imaging.py` | Order DICOM slices and decode/normalize pixels |
-| `transforms.py` | Resize, optional random rotation, input normalization |
+| `transforms.py` | Resize, training RandAugment, input normalization |
 | `models.py` | Shared encoder and instance/MIL classifiers |
 | `pretraining.py` | Weight-source settings and RadImageNet checkpoint loading |
 | `training_options.py` | Final epoch selection and model-saving settings |
@@ -88,17 +88,27 @@ to [0, 1]. MONOCHROME1 images are inverted after scaling. Constant MRI slices ar
 handled without division by zero. PNG/JPEG intensities scale by their integer
 dtype range. Both training and validation then normalize using mean/std 0.5.
 
-The default training augmentation is a fresh random rotation up to 10 degrees
-on each access. Validation has no random augmentation. This replaces the generic
-uint8 RandAugment pipeline so DICOM precision is retained. Customize explicitly:
+Training uses fresh RandAugment on every image access, for all datasets and both
+instance and MIL training. Defaults match the original `RandAugment()`: two
+operations, magnitude 9, nearest-neighbor interpolation and default zero fill.
+After resizing, scaled training pixels are temporarily quantized to uint8 for
+RandAugment, then converted back to [0, 1] floats before normalization. DICOM
+windowing/percentile scaling still happens before this conversion. Validation
+has no random augmentation or uint8 conversion.
 
 ```yaml
 res: 224
 transform_kwargs:
-    rotation: 10.0 # Set 0 to disable; assess suitability for each dataset
+    num_ops: 2 # Set 0 to disable augmentation
+    magnitude: 9 # Integer from 0 to 30
     mean: 0.5
     std: 0.5
 ```
+
+Replace legacy `transform_kwargs.rotation` with the options above. Attention
+defaults to 16 heads in resolved configs and the sweep; `net_kwargs.num_heads`
+or `--num-heads` can explicitly override it. Use a new sweep run name when
+comparing this augmentation with existing results.
 
 Slices are ordered by position projected onto the orientation-derived normal,
 with InstanceNumber as the fallback when geometry is absent. Duplicate positions,

@@ -66,6 +66,7 @@ def load_config(path, task=None, overrides=None, net_overrides=None):
     # Check pooling settings before creating the encoder or downloading its weights.
     options = cfg.setdefault("net_kwargs", {})
     options.setdefault("pooling_method", "attn")
+    options.setdefault("num_heads", 16)
     if type(options.get("num_heads", 1)) is not int or options.get("num_heads", 1) < 1:
         raise ValueError("num_heads must be a positive integer")
     if options["pooling_method"] not in POOLING_METHODS:

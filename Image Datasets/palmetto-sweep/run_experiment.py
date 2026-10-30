@@ -15,7 +15,12 @@ def read_yaml(path):
         return yaml.safe_load(stream)
 
 
-def experiment_config(sweep, dataset, stage, source, pooling, threads):
+def experiment_config(sweep, dataset, stage, source, pooling, threads, encoder_state=None):
+    if stage == "mil":
+        if encoder_state not in ("trainable", "frozen"):
+            raise ValueError("MIL requires an explicit encoder_state: trainable or frozen")
+        if encoder_state not in sweep["encoder_states"]:
+            raise ValueError("Requested encoder state is not enabled in the sweep")
     project = Path(sweep["project_dir"]).expanduser().resolve()
     base_path = project / "config" / f"{dataset}_config.yaml"
     cfg = read_yaml(base_path)
@@ -49,7 +54,7 @@ def experiment_config(sweep, dataset, stage, source, pooling, threads):
         cfg.pop(key, None)
     cfg.update(task=dataset, mil=stage == "mil", pretraining=source, device="cuda",
                seed=sweep["seed"], folds=sweep["folds"], instance_load_clf=False,
-               freeze_enc=sweep["freeze_encoder"] if stage == "mil" else False, freeze_clf=False)
+               freeze_enc=stage == "mil" and encoder_state == "frozen", freeze_clf=False)
     cfg["model_selection"] = sweep.get("model_selection", "last")
     # Instance checkpoints are required inputs for the downstream MIL jobs.
     cfg["save_models"] = True if stage == "instance" else sweep.get("save_models", True)
@@ -71,13 +76,14 @@ def main():
     parser.add_argument("--stage", required=True, choices=("instance", "mil"))
     parser.add_argument("--source", default="imagenet", choices=("imagenet", "radimagenet", "instance"))
     parser.add_argument("--pooling", default="attn")
+    parser.add_argument("--encoder-state", choices=("trainable", "frozen"))
     parser.add_argument("--instance-marker", default="")
     parser.add_argument("--threads", type=int, required=True)
     parser.add_argument("--marker", required=True)
     parser.add_argument("--log", required=True)
     args = parser.parse_args()
     sweep = read_yaml(args.sweep)
-    cfg = experiment_config(sweep, args.dataset, args.stage, args.source, args.pooling, args.threads)
+    cfg = experiment_config(sweep, args.dataset, args.stage, args.source, args.pooling, args.threads, args.encoder_state)
 
     if cfg["pretraining"] == "instance":
         previous = json.loads(Path(args.instance_marker).read_text(encoding="utf-8"))
@@ -90,7 +96,9 @@ def main():
     # The trainer cannot resume epochs and refuses a nonempty save_dir.
     label = "instance_pretrain" if args.stage == "instance" else f"{args.source}_{args.pooling}"
     root = Path(sweep["results_dir"]).expanduser().resolve() / sweep["run_name"]
-    attempts = root / "attempts" / args.dataset / label
+    # Instance pretraining has no encoder-state dimension and is shared by both MIL states.
+    state_dir = "shared" if args.stage == "instance" else args.encoder_state
+    attempts = root / "attempts" / state_dir / args.dataset / label
     attempts.mkdir(parents=True, exist_ok=True)
     attempt = Path(tempfile.mkdtemp(prefix="run_", dir=attempts))
     cfg["save_dir"] = str(attempt / "artifacts")
@@ -120,6 +128,8 @@ def main():
     marker = Path(args.marker)
     marker.parent.mkdir(parents=True, exist_ok=True)
     record = dict(dataset=args.dataset, stage=args.stage, pretraining=cfg["pretraining"],
+                  encoder_state=args.encoder_state if args.stage == "mil" else None,
+                  freeze_enc=cfg["freeze_enc"],
                   pooling=args.pooling if args.stage == "mil" else None,
                   output_dir=str(output), config=str(generated), folds=cfg["folds"],
                   model_selection=cfg["model_selection"], save_models=cfg["save_models"])

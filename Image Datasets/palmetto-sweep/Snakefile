@@ -16,6 +16,7 @@ PYTHON = config["python"]
 DATASETS = config["datasets"]
 POOLING = config["pooling"]
 SOURCES = config.get("sources", ["imagenet", "radimagenet", "instance"])
+STATES = config["encoder_states"]
 ROOT = str(Path(config["results_dir"]).expanduser().resolve() / config["run_name"])
 HELPER = str(Path(workflow.basedir) / "run_experiment.py")
 SWEEP = str(Path("sweep.yaml").resolve())
@@ -25,6 +26,9 @@ assert set(DATASETS) <= {"achilles", "ct", "mri", "xray"}
 assert set(POOLING) <= {"attn", "tanh_attn", "max", "avg", "transformer"}
 assert set(SOURCES) <= {"imagenet", "radimagenet", "instance"}
 assert DATASETS and POOLING and SOURCES
+assert isinstance(STATES, list) and STATES and set(STATES) <= {"trainable", "frozen"}
+assert len(STATES) == len(set(STATES)), "Duplicate encoder states"
+assert "freeze_encoder" not in config, "Replace freeze_encoder with encoder_states"
 assert config.get("num_epochs") is None or (type(config["num_epochs"]) is int and config["num_epochs"] > 0)
 assert config["instance_initialization"] in ("imagenet", "radimagenet")
 assert re.fullmatch(r"[A-Za-z0-9_-]+", config["run_name"]), "Use a simple run_name"
@@ -53,13 +57,14 @@ def mil_dependencies(wildcards):
 wildcard_constraints:
     dataset="|".join(DATASETS),
     source="|".join(SOURCES),
-    pooling="|".join(POOLING)
+    pooling="|".join(POOLING),
+    encoder_state="|".join(STATES)
 
 
 rule all:
     input:
-        expand(ROOT + "/completed/{dataset}/{source}/{pooling}.json",
-               dataset=DATASETS, source=SOURCES, pooling=POOLING)
+        expand(ROOT + "/completed/{encoder_state}/{dataset}/{source}/{pooling}.json",
+               dataset=DATASETS, source=SOURCES, pooling=POOLING, encoder_state=STATES)
 
 
 rule instance_pretrain:
@@ -93,7 +98,7 @@ rule train_mil:
         code=CODE,
         initialization=mil_dependencies
     output:
-        ROOT + "/completed/{dataset}/{source}/{pooling}.json"
+        ROOT + "/completed/{encoder_state}/{dataset}/{source}/{pooling}.json"
     threads: config["cpus"]
     resources:
         mem_mb=lambda w: config["resources"][w.dataset]["mem_mb"],
@@ -102,8 +107,8 @@ rule train_mil:
     params:
         pretrained=lambda w: instance_marker(w.dataset) if w.source == "instance" else ""
     log:
-        ROOT + "/logs/{dataset}/{source}/{pooling}.log"
+        ROOT + "/logs/{encoder_state}/{dataset}/{source}/{pooling}.log"
     shell:
         "{PYTHON:q} {input.helper:q} --sweep {input.sweep:q} --dataset {wildcards.dataset:q} "
-        "--stage mil --source {wildcards.source:q} --pooling {wildcards.pooling:q} "
+        "--stage mil --encoder-state {wildcards.encoder_state:q} --source {wildcards.source:q} --pooling {wildcards.pooling:q} "
         "--instance-marker={params.pretrained:q} --threads {threads} --marker {output:q} --log {log:q}"
