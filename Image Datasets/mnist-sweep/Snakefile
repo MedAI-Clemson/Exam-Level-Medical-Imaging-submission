@@ -1,0 +1,64 @@
+"""Separate MNIST experiment, sharing the medical workflow's model definitions."""
+from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(workflow.basedir)))
+from bags import validate
+
+configfile: "sweep.yaml"
+validate(config)
+shell.executable("/bin/bash")
+shell.prefix("module load anaconda3/2023.09-0; source activate snakemake-slurm; ")
+
+BASE = Path(workflow.basedir)
+PROJECT = Path(config['project_dir']).expanduser().resolve()
+ROOT = str(Path(config['results_dir']).expanduser().resolve() / config['run_name'])
+PYTHON = config['python']
+SCRIPT = str(BASE / 'run_experiment.py')
+# Pass the fully merged configuration, including --config overrides, to every job.
+import json
+Path(ROOT).mkdir(parents=True, exist_ok=True)
+RESOLVED = str(Path(ROOT) / 'sweep.resolved.json')
+serialized = json.dumps(dict(config), indent=2, sort_keys=True)
+if not Path(RESOLVED).exists() or Path(RESOLVED).read_text() != serialized:
+    Path(RESOLVED).write_text(serialized)
+
+wildcard_constraints:
+    size='|'.join(map(str, config['bag_sizes'])),
+    density='|'.join(map(str, config['densities'])),
+    pooling='|'.join(config['pooling'])
+
+rule all:
+    input: ROOT + '/summary.csv'
+
+# Download once on the controller, before submitting GPU work. Also cache ImageNet weights.
+localrules: prepare, summarize
+
+rule prepare:
+    input: cfg=RESOLVED, script=SCRIPT, design=str(BASE / 'bags.py')
+    output: ROOT + '/design.json'
+    log: ROOT + '/logs/prepare.log'
+    shell: '{PYTHON:q} {input.script:q} prepare --config {input.cfg:q} > {log:q} 2>&1'
+
+rule train_mnist:
+    input:
+        design=ROOT + '/design.json', cfg=RESOLVED, script=SCRIPT,
+        bags=str(BASE / 'bags.py'), models=str(PROJECT / 'models.py'),
+        pretraining=str(PROJECT / 'pretraining.py')
+    output:
+        marker=ROOT + '/completed/n{size}/p{density}/{pooling}.json',
+        predictions=ROOT + '/runs/n{size}/p{density}/{pooling}/test_predictions.csv'
+    threads: config['cpus']
+    resources: mem_mb=config['mem_mb'], runtime=config['runtime_minutes'], gpu=1
+    log: ROOT + '/logs/n{size}/p{density}/{pooling}.log'
+    shell:
+        '{PYTHON:q} -u {input.script:q} train --config {input.cfg:q} '
+        '--size {wildcards.size} --density {wildcards.density} --pooling {wildcards.pooling:q} '
+        '--threads {threads} > {log:q} 2>&1'
+
+rule summarize:
+    input:
+        markers=expand(ROOT + '/completed/n{size}/p{density}/{pooling}.json',
+                       size=config['bag_sizes'], density=config['densities'], pooling=config['pooling']),
+        script=SCRIPT, cfg=RESOLVED
+    output: ROOT + '/summary.csv'
+    shell: '{PYTHON:q} {input.script:q} summarize --config {input.cfg:q}'
