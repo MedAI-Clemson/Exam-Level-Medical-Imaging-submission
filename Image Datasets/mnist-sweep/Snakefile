@@ -1,64 +1,71 @@
-"""Separate MNIST experiment, sharing the medical workflow's model definitions."""
+"""Independent composition jobs with verified reuse of legacy results."""
 from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(workflow.basedir)))
 from bags import validate
+from sweep_support import combinations, single_config, write_stable, retained_result
 
 configfile: "sweep.yaml"
 validate(config)
 shell.executable("/bin/bash")
 shell.prefix("module load anaconda3/2023.09-0; source activate snakemake-slurm; ")
-
 BASE = Path(workflow.basedir)
 PROJECT = Path(config['project_dir']).expanduser().resolve()
-ROOT = str(Path(config['results_dir']).expanduser().resolve() / config['run_name'])
+ROOT = Path(config['results_dir']).expanduser().resolve() / config['run_name']
 PYTHON = config['python']
 SCRIPT = str(BASE / 'run_experiment.py')
-# Pass the fully merged configuration, including --config overrides, to every job.
-import json
-Path(ROOT).mkdir(parents=True, exist_ok=True)
-RESOLVED = str(Path(ROOT) / 'sweep.resolved.json')
-serialized = json.dumps(dict(config), indent=2, sort_keys=True)
-if not Path(RESOLVED).exists() or Path(RESOLVED).read_text() != serialized:
-    Path(RESOLVED).write_text(serialized)
+PAIRS = combinations(config)
+RESOLVED = str(ROOT / 'sweep.expanded.json')
+write_stable(RESOLVED, dict(config))
+
+# Adding a condition must not alter the inputs of existing training jobs.
+for n, d in PAIRS:
+    write_stable(ROOT / 'configs' / f'n{n}' / f'p{d}.json', single_config(config,n,d))
+MARKERS = []
+for n, d in PAIRS:
+    for p in config['pooling']:
+        retained = retained_result(config, ROOT, BASE, n, d, p)
+        marker = ROOT / 'completed' / f'n{n}' / f'p{d}' / f'{p}.json'
+        if marker.exists() and not retained and not (ROOT / 'designs' / f'n{n}' / f'p{d}.json').exists():
+            raise ValueError('Legacy runs found. Run run_experiment.py migrate --config sweep.yaml first.')
+        MARKERS.append(str(retained or marker))
 
 wildcard_constraints:
-    size='|'.join(map(str, config['bag_sizes'])),
-    density='|'.join(map(str, config['densities'])),
+    size='|'.join(str(n) for n in sorted({n for n,d in PAIRS})),
+    density='|'.join(str(d) for d in sorted({d for n,d in PAIRS})),
     pooling='|'.join(config['pooling'])
 
 rule all:
-    input: ROOT + '/summary.csv'
+    input: str(ROOT / 'summary.csv')
 
-# Download once on the controller, before submitting GPU work. Also cache ImageNet weights.
 localrules: prepare, summarize
 
 rule prepare:
-    input: cfg=RESOLVED, script=SCRIPT, design=str(BASE / 'bags.py')
-    output: ROOT + '/design.json'
-    log: ROOT + '/logs/prepare.log'
+    input:
+        cfg=str(ROOT / 'configs/n{size}/p{density}.json'), script=SCRIPT,
+        design=str(BASE / 'bags.py'), support=str(BASE / 'sweep_support.py')
+    output: str(ROOT / 'designs/n{size}/p{density}.json')
+    log: str(ROOT / 'logs/prepare/n{size}/p{density}.log')
     shell: '{PYTHON:q} {input.script:q} prepare --config {input.cfg:q} > {log:q} 2>&1'
 
 rule train_mnist:
     input:
-        design=ROOT + '/design.json', cfg=RESOLVED, script=SCRIPT,
-        bags=str(BASE / 'bags.py'), models=str(PROJECT / 'models.py'),
-        pretraining=str(PROJECT / 'pretraining.py')
+        design=str(ROOT / 'designs/n{size}/p{density}.json'),
+        cfg=str(ROOT / 'configs/n{size}/p{density}.json'), script=SCRIPT,
+        bags=str(BASE / 'bags.py'), support=str(BASE / 'sweep_support.py'),
+        models=str(PROJECT / 'models.py'), pretraining=str(PROJECT / 'pretraining.py')
     output:
-        marker=ROOT + '/completed/n{size}/p{density}/{pooling}.json',
-        predictions=ROOT + '/runs/n{size}/p{density}/{pooling}/test_predictions.csv'
+        marker=str(ROOT / 'completed/n{size}/p{density}/{pooling}.json'),
+        predictions=str(ROOT / 'runs/n{size}/p{density}/{pooling}/test_predictions.csv')
     threads: config['cpus']
     resources: mem_mb=config['mem_mb'], runtime=config['runtime_minutes'], gpu=1
-    log: ROOT + '/logs/n{size}/p{density}/{pooling}.log'
+    log: str(ROOT / 'logs/n{size}/p{density}/{pooling}.log')
     shell:
         '{PYTHON:q} -u {input.script:q} train --config {input.cfg:q} '
         '--size {wildcards.size} --density {wildcards.density} --pooling {wildcards.pooling:q} '
         '--threads {threads} > {log:q} 2>&1'
 
 rule summarize:
-    input:
-        markers=expand(ROOT + '/completed/n{size}/p{density}/{pooling}.json',
-                       size=config['bag_sizes'], density=config['densities'], pooling=config['pooling']),
-        script=SCRIPT, cfg=RESOLVED
-    output: ROOT + '/summary.csv'
+    input: markers=MARKERS, script=SCRIPT, cfg=RESOLVED, support=str(BASE / 'sweep_support.py')
+    output: str(ROOT / 'summary.csv')
     shell: '{PYTHON:q} {input.script:q} summarize --config {input.cfg:q}'

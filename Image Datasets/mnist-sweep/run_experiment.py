@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from bags import make_bags, source_split, validate
+from sweep_support import combinations, migrate, retained_result
 
 
 def write_json(path, value):
@@ -38,16 +39,18 @@ def prepare(cfg, root):
               'test': (testing.targets.tolist(), list(range(len(testing))))}
     design = dict(seed=cfg['seed'], target_digit=cfg['target_digit'],
                   source_indices={'train': train_ids, 'val': val_ids, 'test': splits['test'][1]}, conditions={})
-    for size in cfg['bag_sizes']:
-        for density in cfg['densities']:
-            condition = {}
-            for offset, (split, (digit_labels, ids)) in enumerate(splits.items()):
-                condition[split] = make_bags(digit_labels, ids, cfg[f'{split}_bags'], size, density,
-                                             cfg['target_digit'], cfg['seed'] + offset * 100000 + size * 100 + density)
-            design['conditions'][f'n{size}/p{density}'] = condition
+    pairs = combinations(cfg)
+    if len(pairs) != 1:
+        raise ValueError('Preparation expects one condition-specific configuration')
+    size, density = pairs[0]
+    condition = {}
+    for offset, (split, (digit_labels, ids)) in enumerate(splits.items()):
+        condition[split] = make_bags(digit_labels, ids, cfg[f'{split}_bags'], size, density,
+                                    cfg['target_digit'], cfg['seed'] + offset * 100000 + size * 100 + density)
+    design['conditions'][f'n{size}/p{density}'] = condition
     # Download encoder weights once. GPU jobs use the shared user's cache.
     timm.create_model(cfg['encoder'], pretrained=True, num_classes=0)
-    write_json(root / 'design.json', design)
+    write_json(root / 'designs' / f'n{size}' / f'p{density}.json', design)
     print('Prepared all shared bag manifests and cached ImageNet weights.', flush=True)
 
 
@@ -70,7 +73,7 @@ def train(cfg, root, args):
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
 
-    design_path = root / 'design.json'
+    design_path = root / 'designs' / f'n{args.size}' / f'p{args.density}.json'
     design = json.loads(design_path.read_text())
     condition = design['conditions'][f'n{args.size}/p{args.density}']
     run = root / 'runs' / f'n{args.size}' / f'p{args.density}' / args.pooling
@@ -161,25 +164,38 @@ def train(cfg, root, args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['prepare', 'train', 'summarize'])
+    parser.add_argument('action', choices=['prepare', 'train', 'summarize', 'migrate'])
     parser.add_argument('--config', required=True)
     parser.add_argument('--size', type=int)
     parser.add_argument('--density', type=int)
     parser.add_argument('--pooling')
     parser.add_argument('--threads', type=int, default=8)
     args = parser.parse_args()
-    cfg = json.loads(Path(args.config).read_text())
+    config_path = Path(args.config)
+    if config_path.suffix == '.json':
+        cfg = json.loads(config_path.read_text())
+    else:
+        import yaml
+        cfg = yaml.safe_load(config_path.read_text())
     validate(cfg)
     root = Path(cfg['results_dir']).expanduser().resolve() / cfg['run_name']
-    if args.action == 'prepare':
+    if args.action == 'migrate':
+        migrate(cfg, root, Path(__file__).parent)
+    elif args.action == 'prepare':
         prepare(cfg, root)
     elif args.action == 'train':
-        if args.size not in cfg['bag_sizes'] or args.density not in cfg['densities'] or args.pooling not in cfg['pooling']:
+        if (args.size, args.density) not in combinations(cfg) or args.pooling not in cfg['pooling']:
             parser.error('Training condition is not in the sweep')
         train(cfg, root, args)
     else:
-        rows = [json.loads((root / 'completed' / f'n{n}' / f'p{d}' / f'{p}.json').read_text())
-                for n in cfg['bag_sizes'] for d in cfg['densities'] for p in cfg['pooling']]
+        rows = []
+        for n, d in combinations(cfg):
+            for p in cfg['pooling']:
+                retained = retained_result(cfg, root, Path(__file__).parent, n, d, p)
+                if retained:
+                    rows.append(json.loads(retained.read_text())['result'])
+                else:
+                    rows.append(json.loads((root / 'completed' / f'n{n}' / f'p{d}' / f'{p}.json').read_text()))
         write_csv(root / 'summary.csv', rows)
 
 

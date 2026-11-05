@@ -6,8 +6,11 @@ results_dir: ../results
 run_name: mnist_composition_v2
 
 pooling: [avg, max, attn, tanh_attn, transformer]
-bag_sizes: [20, 100]
-densities: [5, 10, 50] # Percent digit 9 in positive bags; negatives contain none.
+# Percent digit 9 in positive bags, specified separately for each bag size.
+densities_by_bag_size:
+  10: [10, 20, 50]
+  20: [5, 10, 25, 50]
+  100: [1, 5, 10, 25, 50]
 target_digit: 9
 seed: 123
 train_bags: 1000

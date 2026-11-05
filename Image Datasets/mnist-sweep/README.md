@@ -1,53 +1,67 @@
-# MNIST bag composition experiment
+# MNIST bag composition sweep
 
-This separate sweep reuses `../models.py` and `../pretraining.py`. The existing medical training code and palmetto-sweep configuration are unchanged.
+This workflow reuses `../models.py` and `../pretraining.py`, and the existing Palmetto profile. Training remains ImageNet ResNet-50 with a frozen encoder, 10 epochs, last-epoch evaluation, and no saved models, as configured in `sweep.yaml`.
 
-The default experiment has **40 training jobs**: five pooling methods × bag sizes 20/100 × positive-instance densities 5/10/25/50 percent. Each uses one seed, 1,000 training bags, 200 validation bags and 1,000 test bags, with equal positive/negative counts. A positive bag contains exactly the specified fraction of digit 9; a negative bag contains no 9. Distractor digit classes are sampled uniformly from the other nine classes. Image sampling is with replacement within a source split, so images can recur across bags. These are synthetic bags, not independent patients.
+## Requested conditions
 
-Source images are split before constructing bags: a stratified 80/20 split of the official MNIST training images supplies training/validation; official MNIST test images supply testing. All methods share the same saved manifests. Each condition is trained and tested at the same density. This is not a test of generalization to unseen densities.
+| Bag size | Positive-bag digit 9 densities | Training jobs |
+|---|---|---|
+| 10 | 10%, 20%, 50% | 15 |
+| 20 | 5%, 10%, 25%, 50% | 20 |
+| 100 | 1%, 5%, 10%, 25%, 50% | 25 |
 
-All methods use ImageNet ResNet-50, a trainable encoder, a random classifier, 16 attention heads where applicable, 224×224 RGB copies of grayscale images, ImageNet normalization, and no augmentation. Defaults: 20 epochs, Adam (learning rate 0.001, weight decay 0.001), StepLR (8 epochs, factor 0.1), and one bag per batch. Last epoch is evaluated. No model weights are saved. Change these settings in this sweep's YAML and use a new run name when changing the experiment.
+There are 60 runs across five pooling methods. The previous v2 sweep had 30 runs (sizes 20/100 at 5/10/50%). Retaining those leaves **30 new GPU jobs**. Each condition uses 1,000 training, 200 validation, and 1,000 test bags. Each split is balanced. The target digit is 9, negative bags contain none, and distractors are sampled uniformly over the other digit classes. Source-image splits and sampling seeds are unchanged from the previous implementation.
 
-## Palmetto commands
+## Extend the existing v2 results on Palmetto
 
-From the cloned repository:
+Push these changes, pull them on Palmetto, then run the following from the repository root. Stop any existing controller using this run folder before migrating.
 
 ```bash
 cd "Image Datasets/mnist-sweep"
 module load anaconda3/2023.09-0
 source activate snakemake-slurm
 
-# Review the 40 training jobs plus preparation and summary.
+# Run once, before the first dry-run of the expanded workflow.
+/home/bformby/.conda/envs/pytorch/bin/python run_experiment.py migrate --config sweep.yaml
+
 snakemake --profile ../palmetto-sweep/profiles/palmetto --dry-run
-
-# Download MNIST, cache ImageNet weights, and build manifests on the controller.
-snakemake --profile ../palmetto-sweep/profiles/palmetto prepare --cores 1
-
-# Launch the full experiment, preferably in your persistent controller session.
 snakemake --profile ../palmetto-sweep/profiles/palmetto
 ```
 
-Edit `python` and `data_dir` in `sweep.yaml` if needed. Relative project/results paths are resolved from this directory. This reuses the existing profile's partition, account, GPU type and maximum concurrent jobs. The training interpreter is your `pytorch` environment; the controller environment is `snakemake-slurm`. Preparation needs internet access for MNIST and encoder weights, and the same home/cache must be visible on compute nodes. The controller only prepares data and summarizes; it does not train.
+Migration should report **30 retained runs** if all old runs are present and their saved settings match. The dry-run should then show **30 train_mnist jobs**, six local preparation jobs, and summary/all jobs. Do not proceed if completed runs unexpectedly appear as training jobs; investigate the migration message. The profile's controller `local-cores: 1` serializes preparation and shared-cache downloads.
 
-For a one-epoch smoke test of all 40 conditions, use a different run name. Repeat the same overrides when resuming that test:
+Migration reads the original `design.json`, completion markers, resolved per-run settings and predictions. It checks model settings, frozen/trainable labels, epochs, design hashes, and prediction bag IDs/labels/counts. It writes checksummed receipts under `retained/`. It does not rewrite old manifests, scores, prediction files, or completion markers, and it does not retrain. Repeating migration is safe; it will not reapprove a retained run whose code, settings, or files have changed. A metadata mismatch stops migration rather than guessing which experiment was executed.
+
+Retained receipts are explicit external inputs to the new summary, not outputs of the training rule. This avoids triggering legacy training because its old Snakemake metadata references the previous shared configuration. No global `--rerun-triggers mtime`, touching of completion files, or blanket suppression of dependency checks is needed. The stored code hashes establish the migration-time implementation baseline; they cannot prove the exact historical code used on Palmetto. Only migrate after confirming that the old runs used the model/training implementation you intended.
+
+## New sweeps and later additions
+
+For a fresh experiment, select a new `run_name` and run Snakemake normally; no migration is needed. For a one-epoch smoke test use a fresh name:
 
 ```bash
-snakemake --profile ../palmetto-sweep/profiles/palmetto --dry-run --config run_name=mnist_composition_smoke num_epochs=1
-snakemake --profile ../palmetto-sweep/profiles/palmetto --config run_name=mnist_composition_smoke num_epochs=1
+snakemake --profile ../palmetto-sweep/profiles/palmetto --config run_name=mnist_expansion_smoke num_epochs=1
 ```
 
-The effective configuration is saved even on a dry-run so command-line overrides reach every job. Do not run two controllers with different settings under the same run name.
+To extend this grid later, add densities under the appropriate key in `densities_by_bag_size`. Remove the old `bag_sizes` and `densities` keys; do not mix the two formats. Every percentage must correspond to a whole image count. Each condition has an independent stable configuration and manifest, so adding a condition alone does not alter existing training inputs. Adding a pooling method from the supported five also leaves the existing condition configurations unchanged.
 
-## Outputs and interpretation
+Changing training settings or model code is a different experiment: use a new run name. Retained results reject such changes; ordinary new-format jobs continue to use Snakemake dependency tracking. Resource/execution settings are not grounds for rejecting a retained result, though changing fields in a new-format condition configuration can trigger its rerun. Run from this directory so relative paths resolve consistently.
 
-Outputs go to `../results/mnist_composition_v1/`:
+## Output layout
 
-- `design.json`: source splits and every bag's image indices, label and target count. Indices for train/validation address official training MNIST; test indices address official test MNIST.
-- `runs/n20/p5/avg/` (and analogous paths): resolved configuration, epoch training/validation history, test predictions, and summary.
-- `completed/n20/p5/avg.json`: success marker written only after predictions and metrics.
-- `logs/`: preparation and per-job console output; SLURM logs remain in `.snakemake/slurm_logs`.
-- `summary.csv`: 40 rows with test AUROC, Brier score and loss, generated automatically when all jobs finish.
+The run folder remains `../results/mnist_composition_v2/`:
 
-Use density on the figure's x-axis, AUROC on the y-axis, separate panels for bag size and one curve per pooling method. No repetition-based CIs or significance tests are produced with this single-seed design. Source-image reuse also means ordinary bag bootstrap intervals should not be presented as independent-image uncertainty. Changing density changes both target count and distractor count; it is an experiment on bag composition under the standard MIL assumption.
+- `design.json`, `sweep.resolved.json`, and old run files: preserved legacy records.
+- `retained/n20/p5/avg.json` and analogous paths: verified legacy results with checksums.
+- `sweep.expanded.json`: full current grid, used only for summary generation.
+- `configs/n100/p1.json`: stable configuration for one condition.
+- `designs/n100/p1.json`: newly generated bags for that condition, shared across methods.
+- `runs/n100/p1/avg/`: resolved settings, epoch history, test predictions and summary.
+- `completed/n100/p1/avg.json`: completion marker for a new training run.
+- `logs/`: preparation/training console output. SLURM logs remain in `.snakemake/slurm_logs`.
+- `summary.csv`: automatically rebuilt with retained and new results, 60 rows after completion.
 
-Resume by rerunning the same command. Completed jobs are retained when inputs/settings are unchanged. Interrupted training restarts from epoch one because checkpoints are intentionally disabled. The initial resource/time estimates require calibration on Palmetto; the workflow is not intended for local training.
+Condition manifests have different hashes from the original combined manifest. That is expected: hashes identify different files, not different source split policies. Each row retains the hash of the manifest actually used for its training run.
+
+Completed new-format jobs resume normally when inputs are unchanged. Interrupted training restarts at epoch one because checkpoints are disabled. No training is intended on the local workstation. CPU-only design/reuse checks can be run with `python -m unittest discover -p 'test_*.py'`.
+
+Report these as single-seed results without repetition-based confidence intervals. At fixed density, larger bags contain more target and distractor images; this is a composition experiment, not an isolated causal test of density alone.

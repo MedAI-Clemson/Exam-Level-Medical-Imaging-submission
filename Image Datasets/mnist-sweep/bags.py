@@ -2,6 +2,7 @@
 
 import random
 import re
+from sweep_support import combinations
 
 METHODS = ('avg', 'max', 'attn', 'tanh_attn', 'transformer')
 
@@ -12,15 +13,14 @@ def validate(cfg):
     for key in ('train_bags', 'val_bags', 'test_bags'):
         if type(cfg[key]) is not int or cfg[key] < 2 or cfg[key] % 2:
             raise ValueError(f'{key} must be a positive even integer')
-    for key in ('bag_sizes', 'densities', 'pooling'):
+    for key in ('pooling',):
         if not cfg[key] or len(cfg[key]) != len(set(cfg[key])):
             raise ValueError(f'{key} must be nonempty and unique')
     if not set(cfg['pooling']) <= set(METHODS):
         raise ValueError('Unknown pooling method')
-    for n in cfg['bag_sizes']:
-        for density in cfg['densities']:
-            if type(n) is not int or type(density) is not int or n < 1 or not 0 < density <= 100 or n * density % 100:
-                raise ValueError('Every size/density combination must give an integer target count')
+    combinations(cfg)
+    if type(cfg.get('freeze_encoder', False)) is not bool:
+        raise ValueError('freeze_encoder must be true or false')
     if not 0 < cfg['validation_fraction'] < 1 or cfg['target_digit'] not in range(10):
         raise ValueError('Invalid validation fraction or target digit')
     if cfg['save_models'] is not False or cfg['model_selection'] != 'last':

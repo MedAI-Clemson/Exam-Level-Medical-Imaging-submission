@@ -15,8 +15,8 @@ class DesignTests(unittest.TestCase):
             self.assertEqual(sum(self.labels[i] == digit for i in self.val), 20)
 
     def test_all_compositions_and_balance(self):
-        for size in (20, 100):
-            for density in (5, 10, 25, 50):
+        for size, densities in {10: (10,20,50), 20: (5,10,25,50), 100: (1,5,10,25,50)}.items():
+            for density in densities:
                 rows = make_bags(self.labels, self.train, 100, size, density, 9, 123)
                 self.assertEqual(sum(row['label'] for row in rows), 50)
                 for row in rows:
