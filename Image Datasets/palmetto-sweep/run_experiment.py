@@ -53,7 +53,12 @@ def experiment_config(sweep, dataset, stage, source, pooling, threads, encoder_s
     for key in ("pretrain_enc", "pretrain_fc", "instance_load_head", "freeze_fc", "pretrained_model_dir"):
         cfg.pop(key, None)
     cfg.update(task=dataset, mil=stage == "mil", pretraining=source, device="cuda",
-               seed=sweep["seed"], folds=sweep["folds"], instance_load_clf=False,
+               seed=sweep["seed"], folds=sweep["folds"], 
+               instance_load_clf=(
+                    stage == "mil"
+                    and source == "instance"
+                    and sweep.get("instance_load_clf", False)
+                ),
                freeze_enc=stage == "mil" and encoder_state == "frozen", freeze_clf=False)
     cfg["model_selection"] = sweep.get("model_selection", "last")
     # Instance checkpoints are required inputs for the downstream MIL jobs.

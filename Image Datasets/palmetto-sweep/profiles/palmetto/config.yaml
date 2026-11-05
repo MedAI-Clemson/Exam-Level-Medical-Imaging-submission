@@ -1,5 +1,5 @@
 executor: slurm
-jobs: 30
+jobs: 50
 local-cores: 1
 latency-wait: 120
 keep-going: true

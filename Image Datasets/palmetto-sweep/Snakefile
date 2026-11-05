@@ -43,6 +43,16 @@ def instance_config(wildcards):
 
 
 def instance_marker(dataset):
+    previous_run = config.get("instance_pretrained_run")
+    if previous_run:
+        previous_root = (
+            Path(config["results_dir"]).expanduser().resolve() / previous_run
+        )
+        marker = previous_root / "completed" / dataset / "instance_pretrain.json"
+        if not marker.is_file():
+            raise FileNotFoundError(f"Missing previous pretraining marker: {marker}")
+        return str(marker)
+
     return f"{ROOT}/completed/{dataset}/instance_pretrain.json"
 
 

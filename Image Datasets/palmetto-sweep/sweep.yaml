@@ -5,10 +5,10 @@ results_dir: ~/research/ml/Exam-Level-Medical-Imaging-submission/Image Datasets/
 radimagenet_checkpoint: /home/bformby/research/ml/weights/radimagenet/ResNet50.pt
 
 # Use a new name when changing data, preprocessing, or experimental settings.
-run_name: combined_randaugment_sweep
+run_name: instance_clf_sweep
 datasets: [achilles, ct, mri, xray]
-pooling: [avg, max, attn, tanh_attn, transformer]
-sources: [imagenet, radimagenet, instance] # Full sweep: [imagenet, radimagenet, instance]
+pooling: [avg, max, attn, tanh_attn]
+sources: [instance] # Full sweep: [imagenet, radimagenet, instance]
 num_epochs: null # Applies to both stages; set null to use each dataset config's epochs
 
 # Same architecture, seed, folds, and attention head count across comparisons.
@@ -23,6 +23,9 @@ save_models: false # Instance-pretraining checkpoints are still saved for transf
 
 # One shared instance-training run per dataset; it learns from inherited bag labels.
 instance_initialization: imagenet
+
+instance_load_clf: true
+instance_pretrained_run: combined_randaugment_sweep
 
 # Resource estimates only: calibrate with one representative run per dataset.
 cpus: 8

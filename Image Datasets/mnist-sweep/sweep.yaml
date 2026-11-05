@@ -3,11 +3,11 @@ project_dir: ..
 python: /home/bformby/.conda/envs/pytorch/bin/python
 data_dir: ~/research/ml/data/mnist
 results_dir: ../results
-run_name: mnist_composition_v1
+run_name: mnist_composition_v2
 
 pooling: [avg, max, attn, tanh_attn, transformer]
 bag_sizes: [20, 100]
-densities: [5, 10, 25, 50] # Percent digit 9 in positive bags; negatives contain none.
+densities: [5, 10, 50] # Percent digit 9 in positive bags; negatives contain none.
 target_digit: 9
 seed: 123
 train_bags: 1000
@@ -15,11 +15,12 @@ val_bags: 200
 test_bags: 1000
 validation_fraction: 0.2
 
-# One configuration throughout: trainable ImageNet encoder, random MIL classifier.
-num_epochs: 20
+# One configuration throughout: ImageNet encoder, random MIL classifier.
+num_epochs: 10
 model_selection: last
 save_models: false
 encoder: resnet50
+freeze_encoder: true
 num_heads: 16
 resolution: 224
 drop_rate: 0.0
@@ -28,7 +29,7 @@ weight_decay: 0.001
 scheduler_step: 8
 scheduler_gamma: 0.1
 batch_size: 1 # One whole bag; up to 100 images with encoder gradients.
-num_workers: 4
+num_workers: 8
 cpus: 8
 mem_mb: 32000
 runtime_minutes: 720 # Initial estimate; adjust after the smoke test.

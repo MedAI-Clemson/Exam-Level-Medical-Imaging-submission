@@ -82,7 +82,7 @@ def train(cfg, root, args):
                      encoder_kwargs=dict(model_name=cfg['encoder'], in_chans=3, num_classes=1, drop_rate=cfg['drop_rate']),
                      net_kwargs=dict(pooling_method=args.pooling, num_heads=cfg['num_heads'], drop_rate=cfg['drop_rate']))
     resolved = dict(cfg, bag_size=args.size, density_percent=args.density, pooling_method=args.pooling,
-                    freeze_encoder=False, model=model_cfg, design_sha256=hashlib.sha256(design_path.read_bytes()).hexdigest())
+                    freeze_encoder=cfg.get("freeze_encoder", False), model=model_cfg, design_sha256=hashlib.sha256(design_path.read_bytes()).hexdigest())
     write_json(run / 'config.resolved.json', resolved)
 
     transform = transforms.Compose([transforms.Resize((cfg['resolution'], cfg['resolution'])),
@@ -109,7 +109,7 @@ def train(cfg, root, args):
                                 num_workers=cfg['num_workers'], pin_memory=True,
                                 generator=torch.Generator().manual_seed(cfg['seed'])) for split in condition}
     model = build_model(model_cfg).cuda()
-    model.set_encoder_frozen(False)
+    model.set_encoder_frozen(cfg.get("freeze_encoder", False))
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg['learning_rate'], weight_decay=cfg['weight_decay'])
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=cfg['scheduler_step'], gamma=cfg['scheduler_gamma'])
     loss_fn = torch.nn.BCEWithLogitsLoss()
@@ -151,7 +151,7 @@ def train(cfg, root, args):
     metrics, predictions = epoch('test')
     write_csv(run / 'test_predictions.csv', predictions)
     result = dict(bag_size=args.size, density_percent=args.density, pooling=args.pooling,
-                  seed=cfg['seed'], epochs=cfg['num_epochs'], pretraining='imagenet', encoder_state='trainable',
+                  seed=cfg['seed'], epochs=cfg['num_epochs'], pretraining='imagenet', encoder_state='frozen' if cfg.get("freeze_encoder", False) else 'trainable',
                   model_selection='last', save_models=False, test_bags=len(predictions),
                   **metrics, run_dir=str(run), design_sha256=resolved['design_sha256'])
     write_json(run / 'summary.json', result)
