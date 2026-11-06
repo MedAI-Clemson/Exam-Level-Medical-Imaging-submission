@@ -1,0 +1,97 @@
+"""Run paper-native comparators without changing the existing experiments."""
+from pathlib import Path
+import sys
+
+BASE = Path(workflow.basedir)
+sys.path.insert(0, str(BASE))
+from design import conditions, resolve_config, source_files, write_json
+
+configfile: 'sweep.yaml'
+CFG = resolve_config(config, BASE)
+ROOT = Path(CFG['results_dir']) / CFG['run_name']
+RESOLVED = str(ROOT / 'sweep.resolved.json')
+write_json(RESOLVED, CFG)
+CONDITIONS = conditions(CFG)
+DATASETS = sorted({s['dataset'] for s in CONDITIONS.values()})
+PYTHON = CFG['python']
+RUNNER = str(BASE / 'run.py')
+MANIFEST = str(ROOT / 'manifest.json')
+CODE = [str(p) for p in BASE.glob('*.py') if not p.name.startswith('test_')]
+SHARED = [str(Path(CFG['project_dir']) / name) for name in
+          ('configuration.py', 'datasets.py', 'models.py', 'pretraining.py', 'training_options.py', 'utils.py', 'imaging.py', 'transforms.py')]
+MARKERS = expand(str(ROOT / 'completed/{condition}/{method}.json'), condition=list(CONDITIONS), method=CFG['methods'])
+
+shell.executable('/bin/bash')
+shell.prefix('module load anaconda3/2023.09-0; source activate snakemake-slurm; ')
+
+
+def cache_inputs(wildcards):
+    if wildcards.method == 'promil':
+        return []
+    dataset = CONDITIONS[wildcards.condition]['dataset']
+    return [str(ROOT / 'features' / dataset / 'features.npy'), str(ROOT / 'features' / dataset / 'complete.json')]
+
+
+wildcard_constraints:
+    condition='|'.join(CONDITIONS), method='|'.join(CFG['methods']), dataset='|'.join(DATASETS)
+
+
+rule all:
+    input:
+        str(ROOT / 'summary.csv'), str(ROOT / 'fold_metrics.csv'), str(ROOT / 'predictions.csv')
+
+
+localrules: prepare, summarize
+
+
+rule prepare:
+    input:
+        cfg=RESOLVED, script=RUNNER, sources=source_files(CFG), code=CODE, shared=SHARED
+    output:
+        MANIFEST
+    log:
+        str(ROOT / 'logs/prepare.log')
+    shell:
+        '{PYTHON:q} -u {input.script:q} prepare --config {input.cfg:q} > {log:q} 2>&1'
+
+
+rule extract_features:
+    input:
+        manifest=MANIFEST, cfg=RESOLVED, script=RUNNER, code=CODE, shared=SHARED
+    output:
+        matrix=str(ROOT / 'features/{dataset}/features.npy'), marker=str(ROOT / 'features/{dataset}/complete.json')
+    threads: CFG['cpus']
+    resources:
+        mem_mb=CFG['mem_mb'], runtime=CFG['runtime_minutes'], gpu=1
+    log:
+        str(ROOT / 'logs/features/{dataset}.log')
+    shell:
+        '{PYTHON:q} -u {input.script:q} extract --config {input.cfg:q} --dataset {wildcards.dataset:q} > {log:q} 2>&1'
+
+
+rule train_comparator:
+    input:
+        manifest=MANIFEST, cfg=RESOLVED, script=RUNNER, code=CODE, shared=SHARED, features=cache_inputs
+    output:
+        marker=str(ROOT / 'completed/{condition}/{method}.json'),
+        predictions=str(ROOT / 'runs/{condition}/{method}/predictions.csv'),
+        folds=str(ROOT / 'runs/{condition}/{method}/fold_metrics.csv')
+    threads: CFG['cpus']
+    resources:
+        mem_mb=CFG['mem_mb'], runtime=CFG['runtime_minutes'], gpu=1
+    log:
+        str(ROOT / 'logs/{condition}/{method}.log')
+    shell:
+        '{PYTHON:q} -u {input.script:q} train --config {input.cfg:q} '
+        '--condition {wildcards.condition:q} --method {wildcards.method:q} > {log:q} 2>&1'
+
+
+rule summarize:
+    input:
+        markers=MARKERS, cfg=RESOLVED, script=RUNNER, code=CODE,
+        predictions=expand(str(ROOT / 'runs/{condition}/{method}/predictions.csv'), condition=list(CONDITIONS), method=CFG['methods']),
+        folds=expand(str(ROOT / 'runs/{condition}/{method}/fold_metrics.csv'), condition=list(CONDITIONS), method=CFG['methods'])
+    output:
+        str(ROOT / 'summary.csv'), str(ROOT / 'fold_metrics.csv'), str(ROOT / 'predictions.csv')
+    shell:
+        '{PYTHON:q} {input.script:q} summarize --config {input.cfg:q}'
