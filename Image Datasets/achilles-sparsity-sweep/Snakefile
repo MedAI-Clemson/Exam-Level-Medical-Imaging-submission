@@ -1,0 +1,76 @@
+"""Separate Achilles bag-size experiment; each GPU job trains all ten folds."""
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(workflow.basedir)))
+from bags import validate, write_json
+
+configfile: 'sweep.yaml'
+validate(config)
+shell.executable('/bin/bash')
+shell.prefix('module load anaconda3/2023.09-0; source activate snakemake-slurm; ')
+
+BASE = Path(workflow.basedir)
+PROJECT = Path(config['project_dir']).expanduser().resolve()
+ROOT = Path(config['results_dir']).expanduser().resolve() / config['run_name']
+PYTHON = config['python']
+SCRIPT = str(BASE / 'run_experiment.py')
+RESOLVED = str(ROOT / 'sweep.resolved.json')
+write_json(RESOLVED, dict(config))
+DESIGN = str(ROOT / 'design.json')
+DATA = Path(config['data_dir']).expanduser().resolve()
+IMAGES = sorted(str(p) for p in DATA.glob('patient*/*') if p.is_file() and p.suffix.lower() in config['image_extensions'])
+MARKERS = expand(str(ROOT / 'completed/n{size}/{pooling}.json'), size=config['bag_sizes'], pooling=config['pooling'])
+
+wildcard_constraints:
+    size='|'.join(map(str, config['bag_sizes'])),
+    pooling='|'.join(config['pooling'])
+
+
+rule all:
+    input:
+        str(ROOT / 'summary.csv'), str(ROOT / 'fold_metrics.csv'), str(ROOT / 'predictions.csv')
+
+
+localrules: prepare, summarize
+
+
+rule prepare:
+    input:
+        cfg=RESOLVED, script=SCRIPT, bags=str(BASE / 'bags.py'),
+        metadata=str(Path(config['metadata_csv']).expanduser().resolve()), images=IMAGES
+    output:
+        design=DESIGN
+    log:
+        str(ROOT / 'logs/prepare.log')
+    shell:
+        '{PYTHON:q} -u {input.script:q} prepare --config {input.cfg:q} > {log:q} 2>&1'
+
+
+rule train_achilles:
+    input:
+        design=DESIGN, cfg=RESOLVED, script=SCRIPT, bags=str(BASE / 'bags.py'),
+        metrics=str(BASE / 'metrics.py'), models=str(PROJECT / 'models.py'), pretraining=str(PROJECT / 'pretraining.py')
+    output:
+        marker=str(ROOT / 'completed/n{size}/{pooling}.json'),
+        predictions=str(ROOT / 'runs/n{size}/{pooling}/predictions.csv'),
+        folds=str(ROOT / 'runs/n{size}/{pooling}/fold_metrics.csv')
+    threads: config['cpus']
+    resources:
+        mem_mb=config['mem_mb'], runtime=config['runtime_minutes'], gpu=1
+    log:
+        str(ROOT / 'logs/n{size}/{pooling}.log')
+    shell:
+        '{PYTHON:q} -u {input.script:q} train --config {input.cfg:q} '
+        '--size {wildcards.size} --pooling {wildcards.pooling:q} --threads {threads} > {log:q} 2>&1'
+
+
+rule summarize:
+    input:
+        markers=MARKERS, script=SCRIPT, cfg=RESOLVED, metrics=str(BASE / 'metrics.py'),
+        predictions=expand(str(ROOT / 'runs/n{size}/{pooling}/predictions.csv'), size=config['bag_sizes'], pooling=config['pooling']),
+        folds=expand(str(ROOT / 'runs/n{size}/{pooling}/fold_metrics.csv'), size=config['bag_sizes'], pooling=config['pooling'])
+    output:
+        str(ROOT / 'summary.csv'), str(ROOT / 'fold_metrics.csv'), str(ROOT / 'predictions.csv')
+    shell:
+        '{PYTHON:q} {input.script:q} summarize --config {input.cfg:q}'

@@ -1,0 +1,37 @@
+# Run from Image Datasets/achilles-sparsity-sweep on Palmetto.
+project_dir: ..
+python: /home/bformby/.conda/envs/pytorch/bin/python
+data_dir: /project/dane2/wficai/Data/mil_exam_level/achilles_multiclass_data
+metadata_csv: /project/dane2/wficai/Data/mil_exam_level/achilles_multiclass_data/achilles_multiclass_metadata.csv
+image_number_regex: 'img(?P<image_number>\d+)'
+image_extensions: [.png]
+results_dir: ../results
+run_name: achilles_sparsity_frozen_v1
+
+# Fixed binary mapping: 0/1 -> healthy group, 2/3 -> unhealthy group.
+bag_sizes: [10, 20, 50]
+pooling: [avg, max, attn, tanh_attn, transformer]
+folds: 10
+seed: 123
+threshold: 0.5
+
+# Match the latest MNIST configuration; tanh attention now uses one head.
+encoder: resnet50
+freeze_encoder: true
+num_heads: 16
+num_heads_by_pooling: {tanh_attn: 16}
+resolution: 224
+drop_rate: 0.0
+num_epochs: 10
+model_selection: last
+save_models: false
+learning_rate: 0.001
+weight_decay: 0.001
+scheduler_step: 8
+scheduler_gamma: 0.1
+batch_size: 1
+
+num_workers: 7
+cpus: 8
+mem_mb: 32000
+runtime_minutes: 720 # Per job: all ten folds; adjust after the first completed job.
