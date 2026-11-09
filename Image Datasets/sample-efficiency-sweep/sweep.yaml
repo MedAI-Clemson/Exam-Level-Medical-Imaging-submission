@@ -1,0 +1,57 @@
+# Fractions apply to TRAINING patients only; validation folds never shrink.
+project_dir: ..
+results_dir: ../results
+run_name: sample_efficiency_v1
+python: /home/bformby/.conda/envs/pytorch/bin/python
+medical_datasets: [achilles, ct, mri, xray]
+methods: [avg, max, attn, tanh_attn, transformer, dtfd_afs, clam, promil]
+train_percentages: [10, 20, 50, 100]
+sampling_seeds: [123] # Add seeds for repeated subset selections; use a new run_name.
+seed: 123 # Same patient-grouped split seed as the medical sweeps.
+folds: 10
+save_models: false
+
+# Pooling methods inherit dataset config architecture, RandAugment, optimizer,
+# and epoch/scheduler settings. Pretraining/freezing overrides are enforced:
+# ImageNet encoder frozen, randomly initialized classifier trainable, last model.
+# One reference epoch processes the FULL training fold's number of bags at every
+# percentage. Smaller subsets repeat shuffled passes, with fresh augmentation.
+epochs_override: null # Set to 1 with a NEW run_name for a smoke run (all methods).
+smoke_bags_per_epoch: null # Optional small positive bag budget, e.g. 2, for smoke tests only.
+
+# Preserve the existing comparator implementations and their medical profiles.
+# Their schedules below count full-fold-equivalent reference epochs.
+profiles:
+  dtfd_afs:
+    epochs: 200
+    lr: 0.0001
+    weight_decay: 0.0001
+    milestones: [100]
+    gamma: 0.2
+    groups: 4
+    clip: 5.0
+    inference_repeats: 1
+    patience: null
+  clam:
+    epochs: 200
+    lr: 0.0001
+    weight_decay: 0.00001
+    dropout: 0.25
+    k: 8
+    bag_weight: 0.7
+    patience: null
+  promil:
+    medical:
+      epochs: 125
+      warmup_epochs: 25 # Frozen ImageNet ResNet-18, then 100 reference epochs fine-tuning.
+      lr: 0.0001
+      betas: [0.9, 0.999]
+      weight_decay: 0.00001
+      dropout: 0.2
+      patience: null
+
+cpus: 8
+num_workers: 7
+feature_batch_size: 32
+mem_mb: 64000
+runtime_minutes: 360 # All ten folds run sequentially in one job (6 hours).

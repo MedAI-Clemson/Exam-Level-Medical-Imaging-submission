@@ -61,7 +61,20 @@ def profile(cfg, method, mnist):
     return settings
 
 
-def train(cfg, root, condition_name, method):
+def training_order(size, count=None):
+    """Shuffle complete passes, optionally cycling to a fixed bag-update budget."""
+    count = size if count is None else count
+    if size < 1 or type(count) is not int or count < 1:
+        raise ValueError('Training size and update budget must be positive')
+    order = []
+    while len(order) < count:
+        cycle = list(range(size))
+        random.shuffle(cycle)
+        order.extend(cycle[:count-len(order)])
+    return order
+
+
+def train(cfg, root, condition_name, method, fold_number=None, training_bags_per_epoch=None):
     import numpy as np
     import torch
     from torch import nn
@@ -83,6 +96,12 @@ def train(cfg, root, condition_name, method):
     settings = profile(cfg, method, mnist)
     directory = root / 'runs' / condition_name / method
     marker = root / 'completed' / condition_name / f'{method}.json'
+    if fold_number is not None:
+        if type(fold_number) is not int or not 1 <= fold_number <= len(condition['folds']):
+            raise ValueError('Requested fold is outside the saved design')
+        directory = directory / f'fold{fold_number}'
+        marker = root / 'completed' / condition_name / method / f'fold{fold_number}.json'
+    requested_fold = fold_number
     marker.unlink(missing_ok=True)
     features = None
     if method != 'promil':
@@ -97,6 +116,8 @@ def train(cfg, root, condition_name, method):
     all_predictions, fold_results = [], []
 
     for fold_number, splits in enumerate(condition['folds'], start=1):
+        if requested_fold is not None and fold_number != requested_fold:
+            continue
         seed = cfg['seed'] + fold_number
         random.seed(seed)
         np.random.seed(seed)
@@ -127,7 +148,7 @@ def train(cfg, root, condition_name, method):
             bags = splits[split]
             order = list(range(len(bags)))
             if updating:
-                random.shuffle(order)
+                order = training_order(len(bags), training_bags_per_epoch)
             rows, losses = [], []
             for index in order:
                 bag = bags[index]
@@ -208,7 +229,11 @@ def train(cfg, root, condition_name, method):
                 final_metrics[f'bernstein_alpha_{channel}'] = alpha
         for row in final_rows:
             row['selected_epoch'] = selected_epoch
-        fold_results.append(dict(fold=fold_number, selected_epoch=selected_epoch, **final_metrics))
+        fold_results.append(dict(fold=fold_number, selected_epoch=selected_epoch,
+                                 training_bags=len(splits['train']),
+                                 bags_per_reference_epoch=training_bags_per_epoch or len(splits['train']),
+                                 optimizer_updates=number*(training_bags_per_epoch or len(splits['train']))*(2 if method == 'dtfd_afs' else 1),
+                                 **final_metrics))
         all_predictions.extend(final_rows)
         write_csv(directory / f'fold{fold_number}' / 'predictions.csv', final_rows)
         del model, optimizers, schedulers, best_state
