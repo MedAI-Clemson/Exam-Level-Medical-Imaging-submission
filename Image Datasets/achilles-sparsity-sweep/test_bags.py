@@ -2,9 +2,10 @@
 import csv
 import tempfile
 import unittest
+from collections import Counter
 from pathlib import Path
 
-from bags import assign_folds, construct, digest, image_inventory, read_patients, write_csv, write_json
+from bags import assign_folds, construct, digest, image_inventory, read_patients, write_csv, write_json, composition_rows
 from metrics import evaluate, fold_summary
 from run_experiment import summarize
 
@@ -74,6 +75,45 @@ class BagTests(unittest.TestCase):
         tiny = {p: {i: path for i, path in images.items() if i < 3} for p, images in self.inventory.items()}
         _, shortages = construct(self.patients, tiny, self.folds, self.cfg)
         self.assertTrue(any(r['split'] == 'val' and r['available'] < r['required'] for r in shortages))
+
+    def test_replacement_preserves_unique_prefix_and_partition_isolation(self):
+        inventory = {p: {i: path for i, path in images.items() if i < 25} for p, images in self.inventory.items()}
+        old, shortages = construct(self.patients, inventory, self.folds, dict(self.cfg, bag_sizes=[10,20,25]))
+        self.assertFalse(shortages)
+        cfg = dict(self.cfg, bag_sizes=[10,20,25,50,100], replacement_if_needed=True)
+        new, shortages = construct(self.patients, inventory, self.folds, cfg)
+        self.assertFalse(shortages)
+        self.assertEqual(new, construct(self.patients, inventory, self.folds, cfg)[0])
+        only50, _ = construct(self.patients, inventory, self.folds, dict(cfg, bag_sizes=[50]))
+        labels = {p['patient_id']: p['label'] for p in self.patients}
+        for fold, sizes in new.items():
+            for size in ('10','20','25'):
+                self.assertEqual(old[fold][size], sizes[size])
+            self.assertEqual(only50[fold]['50'], sizes['50'])
+            for split in ('train','val'):
+                smaller = {r['patient_id']: Counter(i['path'] for i in r['images']) for r in sizes['50'][split]}
+                for row in sizes['100'][split]:
+                    self.assertEqual(len(row['images']), 100)
+                    self.assertEqual(sum(i['role']=='source' for i in row['images']), 3)
+                    self.assertTrue(smaller[row['patient_id']] <= Counter(i['path'] for i in row['images']))
+                    for image in row['images']:
+                        self.assertEqual(self.folds[image['patient_id']]==int(fold), split=='val')
+                        if image['role']=='distractor':
+                            self.assertEqual(labels[image['patient_id']],0)
+                            self.assertNotEqual(image['patient_id'],row['patient_id'])
+        audit = composition_rows(new)
+        self.assertTrue(any(r['repeated_distractors']>0 for r in audit))
+        self.assertTrue(all(r['unique_images']+r['repeated_distractors']==r['bag_size'] for r in audit))
+        self.assertTrue(all(r['repeated_distractors']==0 for r in audit if r['bag_size']<=25))
+
+    def test_replacement_cannot_borrow_from_another_partition(self):
+        assignments = dict(self.folds)
+        for patient in self.patients:
+            if patient['label']==0:
+                assignments[patient['patient_id']] = 2
+        _, shortages = construct(self.patients, self.inventory, assignments,
+                                 dict(self.cfg, bag_sizes=[100], replacement_if_needed=True))
+        self.assertTrue(any(r['fold']==1 and r['split']=='val' and r['available']==0 for r in shortages))
 
     def test_no_patient_in_both_partitions_and_both_classes_present(self):
         for fold in range(1, 11):

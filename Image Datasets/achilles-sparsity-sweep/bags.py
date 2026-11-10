@@ -39,8 +39,10 @@ def validate(cfg):
     if cfg['folds'] != 10:
         raise ValueError('This experiment uses 10 patient folds')
     sizes = cfg['bag_sizes']
-    if not sizes or len(sizes) != len(set(sizes)) or any(type(n) is not int or n < 3 or n > 50 for n in sizes):
-        raise ValueError('Use distinct bag sizes between 3 and 50')
+    if not sizes or len(sizes) != len(set(sizes)) or any(type(n) is not int or n < 3 or n > 100 for n in sizes):
+        raise ValueError('Use distinct bag sizes between 3 and 100')
+    if type(cfg.get('replacement_if_needed', False)) is not bool:
+        raise ValueError('replacement_if_needed must be true or false')
     if not cfg['pooling'] or not set(cfg['pooling']) <= set(METHODS) or len(cfg['pooling']) != len(set(cfg['pooling'])):
         raise ValueError('Invalid or duplicate pooling methods')
     if cfg['model_selection'] != 'last' or cfg['save_models'] is not False:
@@ -64,8 +66,12 @@ def validate(cfg):
 
 
 def design_settings(cfg):
-    return {k: cfg[k] for k in ('data_dir', 'metadata_csv', 'image_number_regex', 'image_extensions',
-                               'seed', 'folds', 'bag_sizes')}
+    settings = {k: cfg[k] for k in ('data_dir', 'metadata_csv', 'image_number_regex', 'image_extensions',
+                                   'seed', 'folds', 'bag_sizes')}
+    # Preserve the original design identity when replacement is disabled.
+    if cfg.get('replacement_if_needed', False):
+        settings['replacement_if_needed'] = True
+    return settings
 
 
 def read_patients(path):
@@ -167,12 +173,18 @@ def construct(patients, inventory, assignments, cfg):
                           for i in patient['selected']]
                 donors = [dict(image, role='distractor') for image in pool if image['patient_id'] != patient_id]
                 needed = max(sizes) - len(source)
-                if len(donors) < needed:
+                if len(donors) < needed and (not cfg.get('replacement_if_needed', False) or not donors):
                     shortages.append(dict(fold=fold, split=split, patient_id=patient_id,
                                           available=len(donors), required=needed,
                                           largest_feasible_bag=len(donors) + len(source)))
                     continue
                 seeded_rng(cfg['seed'], fold, split, patient_id, 'donors').shuffle(donors)
+                if len(donors) < needed:
+                    # Keep the original unique prefix, then draw uniformly with replacement.
+                    # A separate RNG keeps the prefix identical at all requested bag sizes.
+                    pool_to_repeat = list(donors)
+                    rng = seeded_rng(cfg['seed'], fold, split, patient_id, 'replacement')
+                    donors.extend(dict(rng.choice(pool_to_repeat)) for _ in range(needed-len(donors)))
                 for size in sizes:
                     images = source + donors[:size - len(source)]
                     seeded_rng(cfg['seed'], fold, split, patient_id, size, 'order').shuffle(images)
@@ -183,19 +195,42 @@ def construct(patients, inventory, assignments, cfg):
     return designs, shortages
 
 
+def composition_rows(designs):
+    """Report nominal size separately from unique evidence and duplicated donors."""
+    rows = []
+    for fold, sizes in designs.items():
+        for size, splits in sizes.items():
+            for split, bags in splits.items():
+                for bag in bags:
+                    donors = [i for i in bag['images'] if i['role'] == 'distractor']
+                    unique = len({i['path'] for i in donors})
+                    rows.append(dict(fold=int(fold), split=split, bag_size=int(size),
+                                     patient_id=bag['patient_id'], label=bag['label'],
+                                     source_count=bag['source_count'], source_fraction=bag['source_count']/int(size),
+                                     distractor_count=len(donors), unique_distractors=unique,
+                                     repeated_distractors=len(donors)-unique,
+                                     unique_images=len({i['path'] for i in bag['images']})))
+    return rows
+
+
 def prepare(cfg, root):
     patients, excluded = read_patients(cfg['metadata_csv'])
     inventory = image_inventory(cfg, patients)
     assignments = assign_folds(patients, cfg['folds'], cfg['seed'])
     designs, shortages = construct(patients, inventory, assignments, cfg)
+    composition = composition_rows(designs)
     report = dict(eligible_patients=len(patients), healthy=sum(p['label'] == 0 for p in patients),
                   unhealthy=sum(p['label'] == 1 for p in patients), excluded=excluded,
-                  eligible_images=sum(map(len, inventory.values())), shortages=shortages)
+                  eligible_images=sum(map(len, inventory.values())), shortages=shortages,
+                  replacement_if_needed=cfg.get('replacement_if_needed', False),
+                  bags_with_repeated_distractors=sum(r['repeated_distractors'] > 0 for r in composition))
     write_json(root / 'preparation_report.json', report)
     if shortages:
         smallest = min(r['largest_feasible_bag'] for r in shortages)
         raise ValueError(f'Insufficient distinct healthy donors. See preparation_report.json; '
-                         f'the smallest affected bag capacity is {smallest}. No duplication or cross-partition borrowing was used.')
+                         f'the smallest affected bag capacity is {smallest}. '
+                         f'Replacement is disabled or a donor pool is empty; no cross-partition borrowing is allowed.')
+    write_csv(root / 'bag_composition.csv', composition)
     # Record the actual file mapping and sizes for audit, without copying source images.
     files = [dict(patient_id=p, image_number=i, path=f, bytes=Path(f).stat().st_size)
              for p, images in inventory.items() for i, f in sorted(images.items())]

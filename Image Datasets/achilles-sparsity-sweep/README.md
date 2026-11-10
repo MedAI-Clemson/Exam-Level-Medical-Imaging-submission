@@ -12,7 +12,7 @@ Compare bag sizes **10, 20, and 50** with average, max, ABMIL (dot-product), ABM
 - One donor sequence per source/fold, with nested subsets across bag sizes. All methods receive identical bag manifests; membership is fixed across epochs.
 - Frozen ImageNet ResNet-50, randomly initialized classifier, ten epochs, last-epoch evaluation, no saved model weights. Frozen encoder BatchNorm statistics remain fixed.
 - RGB-repeated grayscale, resize to 224, ImageNet normalization, no augmentation, matching the latest MNIST preprocessing. This does not inherit the medical sweep's RandAugment settings.
-- ABMIL (MLP) uses one head. Dot-product attention and the two-layer transformer use 16 heads.
+- ABMIL (MLP), dot-product attention, and the two-layer transformer use 16 heads.
 - Adam (learning rate 0.001, weight decay 0.001), StepLR (step 8, gamma 0.1), one bag per batch, matching the latest MNIST settings.
 
 The metadata is read from `achilles_multiclass_metadata.csv` at the dataset root. For example, patient1's image number 2 maps to `patient1/img2.png`. Zero is a valid image number. Every selected image must exist; duplicate numbers, unexpected PNG filenames, and missing patient directories cause a clear error.
@@ -64,3 +64,57 @@ Sensitivity and specificity use a predefined probability threshold of 0.5. Thres
 AUROC, sensitivity, specificity, balanced accuracy, and Brier score receive two-sided 90% Student-t intervals across ten folds (9 degrees of freedom). These are approximate fold summaries: training sets overlap, validation folds are small, and bags share donors. Pooled out-of-fold metrics are reported separately and are not the same as mean fold metrics. Intervals are not clipped to [0, 1]. Do not treat the synthetic bags as extra independent patients or these CIs as independent-test guarantees.
 
 Suggested figures plot AUROC, sensitivity, and specificity against bag size, with one curve per method. Sensitivity describes detection under dilution; specificity shows behavior on entirely healthy-group bags.
+
+## Extension: bag sizes 50 and 100
+
+Use `sweep_large_bags.yaml` for **only the new 50- and 100-image conditions**.
+It writes to `../results/achilles_sparsity_frozen_large_bags_v1/`, leaving the
+previous small-bag run untouched. This avoids invalidating its design hash and
+retraining completed small-bag conditions. The five methods require **10 GPU jobs**,
+each training ten folds. Training settings and the fold seed are unchanged.
+
+```bash
+snakemake --profile ../palmetto-sweep/profiles/palmetto --configfile sweep_large_bags.yaml --dry-run
+snakemake --profile ../palmetto-sweep/profiles/palmetto --configfile sweep_large_bags.yaml
+```
+
+For each source exam, use all distinct eligible healthy donor images in a
+reproducible shuffled sequence first. If more images are required, sample the
+remaining positions uniformly **with replacement** from that same donor pool.
+An image may appear more than twice. Only distractors can be repeated: all 1–3
+selected source images appear exactly once. Both bag classes use the same policy.
+Donors remain in the same training/validation partition, and the source patient
+is always excluded. An empty donor pool still stops preparation.
+
+A separate deterministic replacement sequence preserves nesting: the 50-image bag
+is a multiset subset of the 100-image bag. Smaller bag memberships are reproduced
+exactly if metadata, image inventory, and seed match. Membership remains fixed
+across epochs and identical across methods. This is replacement within a bag,
+**not repeated training passes** through the dataset.
+
+`bag_composition.csv` reports source count/fraction, distinct distractors, repeated
+distractor occurrences, and total unique images for each bag and split. Inspect
+this alongside `preparation_report.json`: validation donor pools are smaller, so
+validation bags may repeat more images than training bags. Nominal source-image
+fractions are 2–6% at size 50 and 1–3% at size 100; these do not represent verified
+pathology fractions or 50/100 independent images. Increasing bag size can now
+change both source proportion and duplicate frequency, which should be reported.
+
+Download the new summary, fold metrics, predictions, and bag-composition report
+alongside the old small-bag results to combine them for figures. Do not copy old
+completion markers into the new run or overwrite the old design file.
+
+For DTFD-AFS, CLAM-SB, and ProMIL, a matching extension configuration is provided
+in `comparison-sweep/sweep_achilles_large_bags.yaml`. After preparation has created
+the new Achilles `design.json`, run from `Image Datasets/comparison-sweep`:
+
+```bash
+snakemake --profile ../palmetto-sweep/profiles/palmetto --configfile sweep_achilles_large_bags.yaml --dry-run
+snakemake --profile ../palmetto-sweep/profiles/palmetto --configfile sweep_achilles_large_bags.yaml
+```
+
+This reuses the exact new bags, including repeated image occurrences, and adds
+six comparator training jobs plus one feature-extraction job. Comparator results
+go to `comparison_achilles_large_bags_v1`. The existing comparator schedules are
+preserved; the shortened ProMIL schedule in the sample-efficiency experiment is
+not applied here.

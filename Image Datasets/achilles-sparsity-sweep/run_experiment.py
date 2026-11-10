@@ -129,7 +129,7 @@ def train(cfg, root, args):
     write_csv(run / 'predictions.csv', all_predictions)
     write_csv(run / 'fold_metrics.csv', per_fold)
     result = dict(bag_size=args.size, pooling=args.pooling, encoder_state='frozen' if cfg['freeze_encoder'] else 'trainable',
-                  pretraining='imagenet', num_heads=heads, folds=10, num_epochs=cfg['num_epochs'], threshold=cfg['threshold'],
+                  pretraining='imagenet', replacement_if_needed=cfg.get('replacement_if_needed', False), num_heads=heads, folds=10, num_epochs=cfg['num_epochs'], threshold=cfg['threshold'],
                   model_selection='last', save_models=False, **fold_summary(per_fold),
                   **{f'oof_{k}': v for k, v in evaluate(all_predictions, cfg['threshold']).items()},
                   design_sha256=digest(design_path), run_dir=str(run))
