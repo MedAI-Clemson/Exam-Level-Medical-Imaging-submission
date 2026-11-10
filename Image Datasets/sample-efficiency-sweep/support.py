@@ -105,16 +105,12 @@ def nested_subsets(bags, percentages, seed):
     return result
 
 
-class BudgetBatchSampler:
-    """Fresh shuffled passes over a subset, capped at a full-fold bag budget.
-
-    Each reference epoch has exactly ceil(full_fold_bags / batch_size) updates,
-    including the same short final batch, for every fraction of a fold.
-    """
+class SinglePassBatchSampler:
+    """One shuffled pass per epoch, optionally truncated for smoke tests."""
     def __init__(self, size, batch_size, bag_budget, seed):
         if min(size, batch_size, bag_budget) < 1:
             raise ValueError('Sampler sizes must be positive')
-        self.size, self.batch_size, self.bag_budget = size, batch_size, bag_budget
+        self.size, self.batch_size, self.bag_budget = size, batch_size, min(size, bag_budget)
         self.seed, self.epoch = seed, 0
 
     def __len__(self):
@@ -123,11 +119,9 @@ class BudgetBatchSampler:
     def __iter__(self):
         rng = random.Random(self.seed + self.epoch)
         self.epoch += 1
-        indices = []
-        while len(indices) < self.bag_budget:
-            cycle = list(range(self.size))
-            rng.shuffle(cycle)
-            indices.extend(cycle[:self.bag_budget-len(indices)])
+        indices = list(range(self.size))
+        rng.shuffle(indices)
+        indices = indices[:self.bag_budget]
         for start in range(0, len(indices), self.batch_size):
             yield indices[start:start+self.batch_size]
 

@@ -18,20 +18,29 @@ overwritten or reused as new training runs.
   features and method-specific losses. One feature cache per dataset is shared
   across fractions and folds; the extractor is pretrained and never fitted on
   these patients. Features occupy disk space even though model saving is off.
-- ProMIL: reuse its existing ImageNet ResNet-18 medical profile, including 25
-  frozen reference epochs followed by 100 fine-tuning reference epochs. This
+- ProMIL: reuse its existing ImageNet ResNet-18 medical profile, with 5
+  frozen epochs followed by 20 fine-tuning epochs. This
   comparator is **not frozen throughout**. X-ray uses the existing OVR extension.
   No method loads an instance-pretrained encoder or classifier.
 
-One reference epoch processes the **full training fold's bag count** at every
-fraction, using shuffled repeated passes over smaller subsets. For the five
-pooling methods, batch sizes and the short final batch are also fixed, so the
-number of optimizer updates is identical across fractions within a fold/method.
-CLAM/ProMIL take one bag per update; DTFD performs its existing two-tier updates
-per bag. Learning-rate milestones and ProMIL unfreezing occur at the same update
-counts across fractions. The budgets differ between methods, as in the existing
-comparison. Validation never controls early stopping or checkpoint selection:
-the final model is evaluated, and **no model weights are saved**.
+Each epoch processes every selected training bag once, in shuffled order. Smaller
+fractions therefore require fewer updates. The five pooling methods retain their
+dataset batch sizes, including a smaller final batch. CLAM/ProMIL take one bag per
+update; DTFD retains its two-tier objective. Learning-rate schedules remain epoch-based.
+ProMIL uses parallel bag loading, pinned memory, and worker prefetching while
+preserving its transforms and one-bag objective. Its schedule is 25 epochs total:
+5 frozen, then 20 fine-tuning. Other methods' epoch counts are unchanged.
+Validation never controls early stopping or checkpoint selection: the final model
+is evaluated, and **no model weights are saved**.
+
+The run name is `sample_efficiency_v1`. To replace the previous fixed-update run,
+first stop its controller and any remaining jobs, then remove its results directory
+on Palmetto before starting this sweep. This is required because saved settings
+are immutable and the old results belong to a different training procedure.
+From this sweep directory, run `rm -r -- ../results/sample_efficiency_v1`.
+Outputs identify this design with `budget_mode=single_pass`. The legacy
+`bags_per_reference_epoch` column now records the selected bags processed per epoch.
+Smoke-test bag limits truncate the epoch and never repeat bags.
 
 ## Subsets
 
@@ -116,9 +125,16 @@ The existing comparator gradient tests can also be run in the PyTorch environmen
 from `../comparison-sweep`. Source/license notices remain in that directory.
 
 Each training job covers one dataset, patient percentage, sampling seed, and method.
-Together with four feature-extraction jobs, the default sweep submits 132 Slurm jobs.
+Together with four feature-extraction jobs, the default sweep submits 133 Slurm jobs, including one CPU preparation job.
 Completed folds retain their own markers and checksums. Resubmitting an interrupted
 job skips intact folds whose code, settings, and prepared data still match; an
 unfinished fold restarts from its first epoch. Models are not saved.
 The combined job log is `logs/<condition>/<method>/all_folds.log`; detailed fold
 logs remain separate. The default time limit is 6 hours per job.
+
+Preparation is submitted to Slurm as a CPU job (one CPU, no GPU), using the
+configured memory and six-hour time limit. Only summarization runs locally
+on the controller. Training and feature extraction continue to request GPUs.
+
+All submitted jobs (preparation, feature extraction, and training) request 32 GB
+of host memory via `mem_mb: 32000`. This does not set GPU memory.

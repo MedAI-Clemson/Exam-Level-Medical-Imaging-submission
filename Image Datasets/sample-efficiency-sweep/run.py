@@ -9,7 +9,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from support import POOLING, COMPARATORS, BudgetBatchSampler, conditions, immutable_json, prepare, resolve_config
+from support import POOLING, COMPARATORS, SinglePassBatchSampler, conditions, immutable_json, prepare, resolve_config
 
 
 def locations(root, condition, method, fold):
@@ -132,9 +132,9 @@ def train_pooling(cfg, root, name, method, number):
         frames[part].to_csv(directory / f'{part}.csv', index=False)
     train_data = ImagingDataset(frames['train'], model_cfg, train=True)
     val_data = ImagingDataset(frames['val'], model_cfg, train=False)
-    bag_budget = cfg.get('smoke_bags_per_epoch') or condition['full_train_bags'][number-1]
+    bag_budget = min(len(train_data), cfg.get('smoke_bags_per_epoch') or len(train_data))
     batch_size = model_cfg['loader_kwargs']['batch_size']
-    sampler = BudgetBatchSampler(len(train_data), batch_size, bag_budget, seed)
+    sampler = SinglePassBatchSampler(len(train_data), batch_size, bag_budget, seed)
     common = dict(num_workers=cfg['num_workers'], pin_memory=True, collate_fn=collate_bags,
                   worker_init_fn=seed_worker)
     train_loader = DataLoader(train_data, batch_sampler=sampler,
@@ -146,10 +146,10 @@ def train_pooling(cfg, root, name, method, number):
         training, _ = run_epoch(model, train_loader, 'cuda', optimizer)
         validation, predictions = run_epoch(model, val_loader, 'cuda')
         scheduler.step()
-        history.append(dict(reference_epoch=epoch, optimizer_updates=epoch*len(sampler),
+        history.append(dict(epoch=epoch, optimizer_updates=epoch*len(sampler),
                             train_loss=training['loss'], val_loss=validation['loss']))
         write_csv(directory / 'history.csv', history)
-        print(f'{name} {method} fold {number} reference epoch {epoch}: '
+        print(f'{name} {method} fold {number} epoch {epoch}: '
               f'train loss {training["loss"]:.4f}; val loss {validation["loss"]:.4f}', flush=True)
     if model.num_out == 1:
         predictions['probability_0'] = 1-predictions['probability_1']
@@ -180,7 +180,7 @@ def enrich_result(cfg, root, name, method, number):
                 train_patients=len({b['patient_id'] for b in split['train']}),
                 train_bags=len(split['train']), full_train_bags=condition['full_train_bags'][number-1],
                 val_patients=len({b['patient_id'] for b in split['val']}), val_bags=len(split['val']),
-                budget_mode='fixed_updates', smoke_test=any(cfg.get(k) is not None for k in ('epochs_override', 'smoke_bags_per_epoch')))
+                budget_mode='single_pass', smoke_test=any(cfg.get(k) is not None for k in ('epochs_override', 'smoke_bags_per_epoch')))
     # Completion is restored only after all final artifacts are written successfully.
     marker.unlink()
     for filename in ('fold_metrics.csv', 'predictions.csv'):
@@ -233,7 +233,7 @@ def summarize(cfg, root):
             summary = dict(condition=name, method=method, dataset=spec['task'], train_percent=spec['train_percent'],
                            sampling_seed=spec['sampling_seed'], folds=10,
                            encoder_profile=markers[0]['encoder_profile'], model_selection='last', save_models=False,
-                           budget_mode='fixed_updates', smoke_test=markers[0]['smoke_test'],
+                           budget_mode='single_pass', smoke_test=markers[0]['smoke_test'],
                            train_patients_mean=float(np.mean([r['train_patients'] for r in markers])),
                            train_patients_min=min(r['train_patients'] for r in markers),
                            train_patients_max=max(r['train_patients'] for r in markers),
@@ -291,7 +291,8 @@ def main():
         else:
             from train_comparison import train
             manifest = json.loads((root / 'manifest.json').read_text(encoding='utf-8'))
-            budget = cfg.get('smoke_bags_per_epoch') or manifest['conditions'][args.condition]['full_train_bags'][args.fold-1]
+            selected_bags = len(manifest['conditions'][args.condition]['folds'][args.fold-1]['train'])
+            budget = min(selected_bags, cfg.get('smoke_bags_per_epoch') or selected_bags)
             train(cfg, root, args.condition, args.method, fold_number=args.fold, training_bags_per_epoch=budget)
         enrich_result(cfg, root, args.condition, args.method, args.fold)
     else:

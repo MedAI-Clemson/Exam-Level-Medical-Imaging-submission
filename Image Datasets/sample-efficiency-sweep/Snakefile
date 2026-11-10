@@ -51,7 +51,7 @@ rule all:
         str(ROOT / 'summary.csv'), str(ROOT / 'fold_metrics.csv'), str(ROOT / 'predictions.csv')
 
 
-localrules: prepare, summarize
+localrules: summarize
 
 
 rule prepare:
@@ -60,6 +60,9 @@ rule prepare:
         sources=source_files(dict(CFG, experiments=['medical']))
     output:
         manifest=MANIFEST, counts=str(ROOT / 'subset_counts.csv'), report=str(ROOT / 'preparation_report.json')
+    threads: 1
+    resources:
+        mem_mb=CFG['mem_mb'], runtime=CFG['runtime_minutes'], gpu=0
     log:
         str(ROOT / 'logs/prepare.log')
     shell:

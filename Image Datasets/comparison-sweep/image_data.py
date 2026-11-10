@@ -85,3 +85,18 @@ def extract_features(cfg, root, dataset_name):
     write_json(directory / 'complete.json', dict(images=offset, dimensions=1024,
                                                 manifest_sha256=digest(root / 'manifest.json'),
                                                 encoder='torchvision_resnet50_layer3_IMAGENET1K_V1'))
+
+
+class ProMILBags:
+    """Load a whole bag in a worker; keep one bag per optimizer update."""
+    def __init__(self, reader, bags, training):
+        self.reader, self.bags, self.training = reader, bags, training
+
+    def __len__(self):
+        return len(self.bags)
+
+    def __getitem__(self, index):
+        import torch
+        images = torch.stack([self.reader.read(i, 'promil', self.training)
+                              for i in self.bags[index]['images']])
+        return index, images

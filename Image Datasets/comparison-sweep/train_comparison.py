@@ -62,16 +62,13 @@ def profile(cfg, method, mnist):
 
 
 def training_order(size, count=None):
-    """Shuffle complete passes, optionally cycling to a fixed bag-update budget."""
+    """Visit each bag once in shuffled order, optionally truncating for a smoke test."""
     count = size if count is None else count
     if size < 1 or type(count) is not int or count < 1:
         raise ValueError('Training size and update budget must be positive')
-    order = []
-    while len(order) < count:
-        cycle = list(range(size))
-        random.shuffle(cycle)
-        order.extend(cycle[:count-len(order)])
-    return order
+    order = list(range(size))
+    random.shuffle(order)
+    return order[:min(size, count)]
 
 
 def train(cfg, root, condition_name, method, fold_number=None, training_bags_per_epoch=None):
@@ -81,7 +78,8 @@ def train(cfg, root, condition_name, method, fold_number=None, training_bags_per
     from torch.nn import functional as F
     from torchvision.models import resnet18, ResNet18_Weights
     from comparator_models import CLAM, DTFDAFS, LeNet, ProMIL
-    from image_data import ImageReader
+    from image_data import ImageReader, ProMILBags
+    from torch.utils.data import DataLoader
 
     if not torch.cuda.is_available():
         raise RuntimeError('Submit training through Slurm on a GPU')
@@ -143,6 +141,18 @@ def train(cfg, root, condition_name, method, fold_number=None, training_bags_per
                                             weight_decay=settings['weight_decay'])]
             schedulers = []
 
+        # Workers decode/transform upcoming bags while the GPU processes the current bag.
+        # Separate split datasets preserve the existing training/validation transforms.
+        loaders, load_orders = {}, {}
+        if method == 'promil':
+            for part, bags in splits.items():
+                load_orders[part] = list(range(len(bags)))
+                loaders[part] = DataLoader(
+                    ProMILBags(reader, bags, part == 'train'), batch_size=None,
+                    sampler=load_orders[part], num_workers=cfg['num_workers'], pin_memory=True,
+                    persistent_workers=cfg['num_workers'] > 0,
+                    generator=torch.Generator().manual_seed(seed + (part != 'train')))
+
         def epoch(split, updating):
             model.train(updating)
             bags = splits[split]
@@ -150,13 +160,17 @@ def train(cfg, root, condition_name, method, fold_number=None, training_bags_per
             if updating:
                 order = training_order(len(bags), training_bags_per_epoch)
             rows, losses = [], []
-            for index in order:
+            batches = ((index, None) for index in order)
+            if method == 'promil':
+                load_orders[split][:] = order
+                batches = loaders[split]
+            for index, loaded_images in batches:
                 bag = bags[index]
                 label = torch.tensor(bag['label'], device='cuda', dtype=torch.long)
                 if features is not None:
                     inputs = torch.from_numpy(np.array(features[bag['images']], copy=True)).cuda()
                 else:
-                    inputs = torch.stack([reader.read(i, method, updating) for i in bag['images']]).cuda()
+                    inputs = loaded_images.cuda(non_blocking=True)
                 with torch.set_grad_enabled(updating):
                     if method == 'dtfd_afs':
                         if updating:
@@ -236,7 +250,7 @@ def train(cfg, root, condition_name, method, fold_number=None, training_bags_per
                                  **final_metrics))
         all_predictions.extend(final_rows)
         write_csv(directory / f'fold{fold_number}' / 'predictions.csv', final_rows)
-        del model, optimizers, schedulers, best_state
+        del model, optimizers, schedulers, best_state, loaders
         torch.cuda.empty_cache()
 
     write_csv(directory / 'fold_metrics.csv', fold_results)

@@ -14,13 +14,12 @@ save_models: false
 # Pooling methods inherit dataset config architecture, RandAugment, optimizer,
 # and epoch/scheduler settings. Pretraining/freezing overrides are enforced:
 # ImageNet encoder frozen, randomly initialized classifier trainable, last model.
-# One reference epoch processes the FULL training fold's number of bags at every
-# percentage. Smaller subsets repeat shuffled passes, with fresh augmentation.
+# Each epoch visits the selected training bags once, without repetition.
 epochs_override: null # Set to 1 with a NEW run_name for a smoke run (all methods).
 smoke_bags_per_epoch: null # Optional small positive bag budget, e.g. 2, for smoke tests only.
 
 # Preserve the existing comparator implementations and their medical profiles.
-# Their schedules below count full-fold-equivalent reference epochs.
+# Schedules count passes through the selected training subset.
 profiles:
   dtfd_afs:
     epochs: 200
@@ -42,8 +41,8 @@ profiles:
     patience: null
   promil:
     medical:
-      epochs: 125
-      warmup_epochs: 25 # Frozen ImageNet ResNet-18, then 100 reference epochs fine-tuning.
+      epochs: 25
+      warmup_epochs: 5 # Frozen ImageNet ResNet-18, then 20 epochs fine-tuning.
       lr: 0.0001
       betas: [0.9, 0.999]
       weight_decay: 0.00001
@@ -53,5 +52,5 @@ profiles:
 cpus: 8
 num_workers: 7
 feature_batch_size: 32
-mem_mb: 64000
+mem_mb: 32000
 runtime_minutes: 360 # All ten folds run sequentially in one job (6 hours).

@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from support import BudgetBatchSampler, conditions, immutable_json, nested_subsets, prepare, resolve_config
+from support import SinglePassBatchSampler, conditions, immutable_json, nested_subsets, prepare, resolve_config
 
 
 def bags(count=31):
@@ -43,17 +43,19 @@ class SamplingTests(unittest.TestCase):
             self.assertEqual(subset, [b for b in source if b['patient_id'] in selected])
             self.assertEqual({b['label'] for b in subset}, {0,1,2})
 
-    def test_fixed_update_budget_including_short_last_batch(self):
+    def test_single_pass_has_no_repeated_bags(self):
         for size in [3,6,15,31]:
-            sampler = BudgetBatchSampler(size, 8, 31, 123)
+            sampler = SinglePassBatchSampler(size, 8, 31, 123)
             first = list(sampler)
+            flat = [i for batch in first for i in batch]
             self.assertEqual(len(first), len(sampler))
-            self.assertEqual([len(b) for b in first], [8,8,8,7])
-            self.assertEqual(set(i for batch in first for i in batch), set(range(size)))
-            self.assertEqual(first, list(BudgetBatchSampler(size, 8, 31, 123)))
-            self.assertNotEqual(first, list(sampler))
+            self.assertEqual(len(flat), size)
+            self.assertEqual(sorted(flat), list(range(size)))
+            self.assertEqual(first, list(SinglePassBatchSampler(size, 8, 31, 123)))
+        self.assertEqual([len(b) for b in SinglePassBatchSampler(31, 8, 31, 123)], [8,8,8,7])
+        self.assertEqual(sum(map(len, SinglePassBatchSampler(31, 8, 2, 123))), 2)
         with self.assertRaises(ValueError):
-            BudgetBatchSampler(0, 8, 31, 123)
+            SinglePassBatchSampler(0, 8, 31, 123)
 
     def test_run_provenance_cannot_be_replaced(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -84,10 +86,9 @@ class SamplingTests(unittest.TestCase):
         random.seed(7)
         self.assertEqual(module.training_order(17), expected)
         result = module.training_order(3,17)
-        self.assertEqual(len(result),17)
+        self.assertEqual(len(result),3)
         self.assertEqual(set(result),{0,1,2})
-        for start in range(0,15,3):
-            self.assertEqual(set(result[start:start+3]),{0,1,2})
+        self.assertEqual(len(module.training_order(17,2)),2)
         with self.assertRaises(ValueError):
             module.training_order(0,10)
 
