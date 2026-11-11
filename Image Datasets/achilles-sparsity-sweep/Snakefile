@@ -32,15 +32,19 @@ rule all:
         str(ROOT / 'summary.csv'), str(ROOT / 'fold_metrics.csv'), str(ROOT / 'predictions.csv')
 
 
-localrules: prepare, summarize
+localrules: summarize
 
 
 rule prepare:
     input:
         cfg=RESOLVED, script=SCRIPT, bags=str(BASE / 'bags.py'),
-        metadata=str(Path(config['metadata_csv']).expanduser().resolve()), images=IMAGES
+        metadata=str(Path(config['metadata_csv']).expanduser().resolve()), images=IMAGES, sources=[str(Path(config['results_dir']).expanduser().resolve() / run / 'design.json')
+                               for run in sorted(set(config.get('source_runs', {}).values()))]
     output:
         design=DESIGN
+    threads: 1
+    resources:
+        mem_mb=32000, runtime=360, gpu=0
     log:
         str(ROOT / 'logs/prepare.log')
     shell:
@@ -50,7 +54,7 @@ rule prepare:
 rule train_achilles:
     input:
         design=DESIGN, cfg=RESOLVED, script=SCRIPT, bags=str(BASE / 'bags.py'),
-        metrics=str(BASE / 'metrics.py'), models=str(PROJECT / 'models.py'), pretraining=str(PROJECT / 'pretraining.py')
+        baseline=str(PROJECT / 'baselines.py'), metrics=str(BASE / 'metrics.py'), models=str(PROJECT / 'models.py'), pretraining=str(PROJECT / 'pretraining.py')
     output:
         marker=str(ROOT / 'completed/n{size}/{pooling}.json'),
         predictions=str(ROOT / 'runs/n{size}/{pooling}/predictions.csv'),

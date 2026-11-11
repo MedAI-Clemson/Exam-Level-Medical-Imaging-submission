@@ -22,7 +22,7 @@ RUNNER = str(BASE / 'run.py')
 CODE = [str(p) for folder in (BASE, PROJECT / 'comparison-sweep') for p in folder.glob('*.py')
         if not p.name.startswith('test_')]
 SHARED = [str(PROJECT / n) for n in ('train.py', 'configuration.py', 'datasets.py', 'models.py',
-          'pretraining.py', 'training_options.py', 'utils.py', 'imaging.py', 'transforms.py')]
+          'pretraining.py', 'training_options.py', 'utils.py', 'imaging.py', 'transforms.py', 'baselines.py')]
 MARKERS = expand(str(ROOT / 'completed/{condition}/{method}/complete.json'),
                  condition=list(CONDITIONS), method=CFG['methods'])
 PREDICTIONS = expand(str(ROOT / 'runs/{condition}/{method}/predictions.csv'),
@@ -57,7 +57,9 @@ localrules: summarize
 rule prepare:
     input:
         cfg=RESOLVED, code=CODE, shared=SHARED,
-        sources=source_files(dict(CFG, experiments=['medical']))
+        sources=([str(Path(CFG['results_dir']) / CFG['source_run'] / name) for name in
+                  ('manifest.json', 'subset_counts.csv', 'sweep.resolved.json')] if CFG.get('source_run')
+                 else source_files(dict(CFG, experiments=['medical'])))
     output:
         manifest=MANIFEST, counts=str(ROOT / 'subset_counts.csv'), report=str(ROOT / 'preparation_report.json')
     threads: 1

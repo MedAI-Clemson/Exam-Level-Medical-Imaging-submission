@@ -9,7 +9,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from support import POOLING, COMPARATORS, SinglePassBatchSampler, conditions, immutable_json, prepare, resolve_config
+from support import POOLING, COMPARATORS, BASELINES, SinglePassBatchSampler, conditions, immutable_json, prepare, resolve_config
 
 
 def locations(root, condition, method, fold):
@@ -24,7 +24,7 @@ def training_signature(cfg, root):
     for folder in (Path(__file__).parent, project / 'comparison-sweep'):
         files.extend(p for p in folder.glob('*.py') if not p.name.startswith('test_'))
     files.extend(project / n for n in ('train.py', 'configuration.py', 'datasets.py', 'models.py',
-                 'pretraining.py', 'training_options.py', 'utils.py', 'imaging.py', 'transforms.py'))
+                 'pretraining.py', 'training_options.py', 'utils.py', 'imaging.py', 'transforms.py', 'baselines.py'))
     digest = hashlib.sha256(json.dumps(cfg, sort_keys=True).encode())
     for path in sorted(files):
         digest.update(str(path).encode())
@@ -109,13 +109,15 @@ def train_pooling(cfg, root, name, method, number):
     directory, marker = locations(root, name, method, number)
     marker.unlink(missing_ok=True)
     model_cfg['save_dir'] = str(directory)
-    write_json(directory / 'config.resolved.json', model_cfg)
+    write_json(directory / 'config.resolved.json', dict(model_cfg, mil=method != 'instance',
+               baseline=method if method in BASELINES else None))
 
     # Matched initializations for all fractions; subset sampling has its own seed.
     seed = cfg['seed'] + number
     seed_everything(seed)
     torch.set_num_threads(cfg['cpus'])
-    model = build_model(model_cfg)
+    encoder_cfg = dict(model_cfg, mil=method != 'instance')
+    model = build_model(encoder_cfg)
     model.set_encoder_frozen(True)
     model.clf.requires_grad_(True)
     assert all(not p.requires_grad for p in model.encoder.parameters())
@@ -141,10 +143,15 @@ def train_pooling(cfg, root, name, method, number):
                               generator=torch.Generator().manual_seed(seed), **common)
     val_loader = DataLoader(val_data, batch_size=batch_size, shuffle=False,
                             generator=torch.Generator().manual_seed(seed+1), **common)
+    epoch_runner = run_epoch
+    if method in BASELINES:
+        from functools import partial
+        from baselines import run_baseline_epoch
+        epoch_runner = partial(run_baseline_epoch, method=method)
     history = []
     for epoch in range(1, model_cfg['num_epochs']+1):
-        training, _ = run_epoch(model, train_loader, 'cuda', optimizer)
-        validation, predictions = run_epoch(model, val_loader, 'cuda')
+        training, _ = epoch_runner(model, train_loader, 'cuda', optimizer)
+        validation, predictions = epoch_runner(model, val_loader, 'cuda')
         scheduler.step()
         history.append(dict(epoch=epoch, optimizer_updates=epoch*len(sampler),
                             train_loss=training['loss'], val_loss=validation['loss']))
@@ -258,7 +265,7 @@ def main():
     parser.add_argument('action', choices=['prepare', 'extract', 'train', 'train-all', 'summarize'])
     parser.add_argument('--config', required=True, type=Path)
     parser.add_argument('--condition')
-    parser.add_argument('--method', choices=POOLING + COMPARATORS)
+    parser.add_argument('--method', choices=POOLING + COMPARATORS + BASELINES)
     parser.add_argument('--fold', type=int)
     parser.add_argument('--dataset')
     args = parser.parse_args()
@@ -286,7 +293,7 @@ def main():
     elif args.action == 'train':
         if args.condition not in conditions(cfg) or args.method not in cfg['methods'] or args.fold not in range(1,11):
             parser.error('Choose an enabled condition, method, and fold (1..10)')
-        if args.method in POOLING:
+        if args.method in POOLING + BASELINES:
             train_pooling(cfg, root, args.condition, args.method, args.fold)
         else:
             from train_comparison import train

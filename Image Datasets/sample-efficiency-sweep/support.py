@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 
 POOLING = ('avg', 'max', 'attn', 'tanh_attn', 'transformer')
+BASELINES = ('instance', 'stan')
 COMPARATORS = ('dtfd_afs', 'clam', 'promil')
 DATASETS = ('achilles', 'ct', 'mri', 'xray')
 
@@ -17,7 +18,7 @@ def resolve_config(raw, base):
     cfg = copy.deepcopy(raw)
     for key in ('project_dir', 'results_dir'):
         cfg[key] = str((Path(base) / Path(cfg[key]).expanduser()).resolve())
-    for key, allowed in [('methods', POOLING + COMPARATORS), ('medical_datasets', DATASETS)]:
+    for key, allowed in [('methods', POOLING + COMPARATORS + BASELINES), ('medical_datasets', DATASETS)]:
         values = cfg[key]
         if not values or len(set(values)) != len(values) or not set(values) <= set(allowed):
             raise ValueError(f'Invalid or duplicate {key}')
@@ -128,6 +129,27 @@ class SinglePassBatchSampler:
 
 def prepare(cfg, root):
     from design import prepare as prepare_full, check_partition, digest, write_csv
+    if cfg.get('source_run'):
+        import csv
+        source = Path(cfg['results_dir']) / cfg['source_run']
+        saved_cfg = json.loads((source / 'sweep.resolved.json').read_text())
+        for key in ('seed', 'folds', 'medical_datasets', 'train_percentages', 'sampling_seeds'):
+            if cfg[key] != saved_cfg[key]:
+                raise ValueError(f'Source run differs in {key}')
+        manifest = json.loads((source / 'manifest.json').read_text())
+        if set(manifest['conditions']) != set(conditions(cfg)):
+            raise ValueError('Source conditions differ from requested conditions')
+        for condition in manifest['conditions'].values():
+            if len(condition['folds']) != 10:
+                raise ValueError('Expected ten saved folds')
+            for partition in condition['folds']:
+                check_partition(partition)
+        immutable_json(root / 'manifest.json', manifest)
+        with (source / 'subset_counts.csv').open(newline='') as stream:
+            write_csv(root / 'subset_counts.csv', list(csv.DictReader(stream)))
+        immutable_json(root / 'preparation_report.json', dict(source_run=str(source),
+                       manifest_sha256=digest(source / 'manifest.json'), reused_exact_subsets=True))
+        return
     # Reuse the same medical manifest construction and grouped CV as existing runs.
     full_cfg = dict(cfg, experiments=['medical'])
     full_root = root / '_full_design'

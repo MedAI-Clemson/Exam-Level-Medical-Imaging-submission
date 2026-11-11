@@ -138,3 +138,39 @@ on the controller. Training and feature extraction continue to request GPUs.
 
 All submitted jobs (preparation, feature extraction, and training) request 32 GB
 of host memory via `mem_mb: 32000`. This does not set GPU memory.
+
+## Instance and standard-assumption baselines
+
+Run the additional baselines with `sweep_baselines.yaml`. The `instance` baseline
+trains image predictions against inherited bag labels and evaluates each bag by
+the arithmetic mean of its image probabilities. It does not average logits or
+train on the averaged bag probability. `stan` is the standard-assumption baseline:
+it trains against bag labels using the existing numerically stable noisy-OR
+pooling. For multiclass X-ray, noisy-OR class scores are normalized across classes.
+
+Both use a frozen ImageNet encoder, a randomly initialized trainable classifier,
+last-epoch evaluation, and no saved model weights. Every selected image occurrence
+is visited once per epoch; there is no repetition to pad out small training subsets.
+Instance loss is averaged over the images in each training batch; larger bags
+therefore supply more image loss terms. Validation losses and metrics are bag-level.
+Dataset preprocessing, augmentation, optimizer, and schedules are inherited from
+the saved source manifest. Training and validation losses for the instance baseline
+represent different objectives and should not be interpreted as a generalization gap.
+
+`source_run: sample_efficiency_v1` imports the exact saved subsets, validation folds,
+and dataset configuration snapshots. Change this name if your completed run has a
+different name. Missing or incompatible source files cause an error; subsets are
+not silently regenerated. Outputs go to `results/sample_efficiency_baselines_v1`.
+
+From this directory on Palmetto:
+
+```bash
+snakemake --profile ../palmetto-sweep/profiles/palmetto --configfile sweep_baselines.yaml --dry-run
+snakemake --profile ../palmetto-sweep/profiles/palmetto --configfile sweep_baselines.yaml --rerun-incomplete
+```
+
+This submits 32 GPU training jobs (4 datasets x 4 fractions x 2 baselines), each
+running all ten folds, plus one CPU preparation job. Summarization runs locally.
+Each training job requests 32 GB and six hours. Summary, fold metrics, predictions,
+and subset counts retain the existing CSV formats; baseline method names are
+`instance` and `stan`. Existing experiment results are not overwritten.

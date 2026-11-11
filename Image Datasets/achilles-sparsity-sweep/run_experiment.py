@@ -19,6 +19,7 @@ def train(cfg, root, args):
 
     sys.path.insert(0, str(Path(cfg['project_dir']).expanduser().resolve()))
     from models import build_model
+    from baselines import baseline_batch
 
     if not torch.cuda.is_available():
         raise RuntimeError('Training requires a GPU; submit through the Palmetto profile')
@@ -33,7 +34,7 @@ def train(cfg, root, args):
     marker = root / 'completed' / f'n{args.size}' / f'{args.pooling}.json'
     marker.unlink(missing_ok=True)
     heads = cfg['num_heads_by_pooling'].get(args.pooling, cfg['num_heads'])
-    model_cfg = dict(mil=True, pretraining='imagenet',
+    model_cfg = dict(mil=args.pooling != 'instance', pretraining='imagenet',
                      encoder_kwargs=dict(model_name=cfg['encoder'], in_chans=3, num_classes=1, drop_rate=cfg['drop_rate']),
                      net_kwargs=dict(pooling_method=args.pooling, num_heads=heads, drop_rate=cfg['drop_rate']))
     write_json(run / 'config.resolved.json', dict(cfg, bag_size=args.size, method=args.pooling,
@@ -89,15 +90,21 @@ def train(cfg, root, args):
                     labels = labels.float().cuda(non_blocking=True)
                     if updating:
                         optimizer.zero_grad(set_to_none=True)
-                    logits = model(images, [length] * batch).flatten()
-                    loss = criterion(logits, labels)
+                    if args.pooling in ('instance', 'stan'):
+                        loss, probabilities, _ = baseline_batch(model, images, [length] * batch,
+                                                               labels, args.pooling, updating)
+                        probabilities = probabilities[:, 0]
+                    else:
+                        logits = model(images, [length] * batch).flatten()
+                        loss = criterion(logits, labels)
+                        probabilities = logits.sigmoid()
                     if not torch.isfinite(loss):
                         raise ValueError(f'Non-finite loss in fold {fold}')
                     if updating:
                         loss.backward()
                         optimizer.step()
                     total_loss += loss.item() * batch
-                    for index, probability in zip(indices.tolist(), logits.detach().sigmoid().cpu().tolist()):
+                    for index, probability in zip(indices.tolist(), probabilities.detach().cpu().tolist()):
                         row = condition[split][index]
                         predictions.append(dict(patient_id=row['patient_id'], fold=fold, bag_size=args.size,
                                                 pooling=args.pooling, label=row['label'], severity=row['severity'],

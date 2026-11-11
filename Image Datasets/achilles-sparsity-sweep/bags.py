@@ -8,7 +8,7 @@ import re
 from pathlib import Path
 
 
-METHODS = ('avg', 'max', 'attn', 'tanh_attn', 'transformer')
+METHODS = ('avg', 'max', 'attn', 'tanh_attn', 'transformer', 'instance', 'stan')
 
 
 def write_json(path, value):
@@ -71,6 +71,8 @@ def design_settings(cfg):
     # Preserve the original design identity when replacement is disabled.
     if cfg.get('replacement_if_needed', False):
         settings['replacement_if_needed'] = True
+    if cfg.get('source_runs'):
+        settings['source_runs'] = cfg['source_runs']
     return settings
 
 
@@ -213,7 +215,51 @@ def composition_rows(designs):
     return rows
 
 
+def import_saved_designs(cfg, root):
+    """Reuse exact image occurrences and ordering from completed bag experiments."""
+    sources = {int(size): run for size, run in cfg['source_runs'].items()}
+    if set(sources) != set(cfg['bag_sizes']):
+        raise ValueError('source_runs must specify every requested bag size')
+    combined, hashes = None, {}
+    for size, run in sources.items():
+        path = Path(cfg['results_dir']).expanduser().resolve() / run / 'design.json'
+        saved = json.loads(path.read_text(encoding='utf-8'))
+        if saved['metadata_sha256'] != digest(cfg['metadata_csv']):
+            raise ValueError(f'Source metadata changed: {path}')
+        for key in ('seed', 'folds'):
+            if saved['configuration'][key] != cfg[key]:
+                raise ValueError(f'Source {key} differs: {path}')
+        if combined is None:
+            combined = dict(saved, configuration=design_settings(cfg), designs={str(f): {} for f in range(1, 11)})
+        for key in ('folds', 'patients', 'inventory'):
+            if saved[key] != combined[key]:
+                raise ValueError(f'Source designs have different {key}')
+        for fold in range(1, 11):
+            splits = saved['designs'][str(fold)][str(size)]
+            paths, patient_sets = {}, {}
+            for split in ('train', 'val'):
+                rows = splits[split]
+                expected = {p for p, f in saved['folds'].items() if (int(f) == fold) == (split == 'val')}
+                if {r['patient_id'] for r in rows} != expected or len(rows) != len(expected):
+                    raise ValueError('Source bag membership differs from saved patient folds')
+                if any(len(r['images']) != size for r in rows):
+                    raise ValueError('Source bag has incorrect length')
+                paths[split] = {i['path'] for r in rows for i in r['images']}
+                patient_sets[split] = {i['patient_id'] for r in rows for i in r['images']}
+            if paths['train'] & paths['val'] or patient_sets['train'] & patient_sets['val']:
+                raise ValueError('Source bags leak images or donor patients across partitions')
+            combined['designs'][str(fold)][str(size)] = splits
+        hashes[str(path)] = digest(path)
+    combined['source_design_hashes'] = hashes
+    write_json(root / 'design.json', combined)
+    write_csv(root / 'bag_composition.csv', composition_rows(combined['designs']))
+    write_json(root / 'preparation_report.json', dict(reused_exact_bags=True, source_design_hashes=hashes))
+
+
 def prepare(cfg, root):
+    if cfg.get('source_runs'):
+        import_saved_designs(cfg, root)
+        return
     patients, excluded = read_patients(cfg['metadata_csv'])
     inventory = image_inventory(cfg, patients)
     assignments = assign_folds(patients, cfg['folds'], cfg['seed'])

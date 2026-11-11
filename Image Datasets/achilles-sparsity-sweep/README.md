@@ -118,3 +118,37 @@ six comparator training jobs plus one feature-extraction job. Comparator results
 go to `comparison_achilles_large_bags_v1`. The existing comparator schedules are
 preserved; the shortened ProMIL schedule in the sample-efficiency experiment is
 not applied here.
+
+## Instance and standard-assumption baselines
+
+`sweep_baselines.yaml` runs `instance` and `stan` at bag sizes 5, 10, 25, 50, and 100.
+The instance baseline trains every image occurrence using its source bag label,
+including healthy distractors in unhealthy bags, and averages image probabilities
+for bag evaluation. The SA baseline (`stan`) trains on bag labels using noisy-OR.
+Repeated donor images count repeatedly in both objectives, just as in the saved
+bags. No additional repetition is introduced during training.
+
+Both use a frozen ImageNet encoder and randomly initialized trainable classifier,
+the same preprocessing and ten-epoch schedule as the pooling experiment, last-epoch
+evaluation, and no saved models. Instance validation loss uses the averaged bag
+probability; its training loss instead uses inherited image labels.
+
+`source_runs` maps each bag size to an existing results folder. Defaults reuse
+`achilles_sparsity_frozen_v1` for 5/10/25 and
+`achilles_sparsity_frozen_large_bags_v1` for 50/100. Adjust these names if necessary.
+Preparation imports the exact image lists, order, duplicates, and patient folds
+from their `design.json` files, checks partition isolation, and rejects incompatible
+source designs. It does not resample donors. Results are saved separately under
+`results/achilles_sparsity_baselines_v1`, with the usual summary, fold metrics,
+predictions, bag composition, and source-design hashes.
+
+From this directory on Palmetto:
+
+```bash
+snakemake --profile ../palmetto-sweep/profiles/palmetto --configfile sweep_baselines.yaml --dry-run
+snakemake --profile ../palmetto-sweep/profiles/palmetto --configfile sweep_baselines.yaml --rerun-incomplete
+```
+
+There are ten GPU training jobs (5 sizes x 2 baselines), ten folds per job, with
+32 GB memory and six hours per job. Preparation now runs as a CPU Slurm job;
+summarization remains local. Existing completed results are not overwritten.
